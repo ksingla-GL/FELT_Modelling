@@ -1,0 +1,13 @@
+revenue_stream,year_1,year_2,year_3,year_4,year_5,year_6,year_7,year_8,year_9,year_10,notes
+forestry_carbon_accus,0,2000,4000,5000,6000,7000,8000,8500,9000,9500,ACCUs per farm
+forestry_price_per_accu,0,35,40,42,45,45,45,48,50,52,Forward then spot
+soil_carbon_accus,500,800,1200,1500,1800,2000,2200,2400,2500,2600,Immediate start
+soil_price_per_accu,35,35,40,42,45,45,45,48,50,52,Forward to spot transition
+biodiversity_credits,0,0,10,0,5,0,8,0,10,0,Credits per farm
+biodiversity_price,0,0,25000,0,30000,0,35000,0,40000,0,Price per credit
+beef_head_count,0,0,400,500,600,650,700,750,800,850,Cattle per farm
+beef_revenue_per_head,0,0,850,900,950,1000,1050,1100,1150,1200,Premium pricing
+water_credits_ml,0,0,0,50,100,150,200,250,300,350,Megalitres saved
+water_price_per_ml,0,0,0,500,550,600,650,700,750,800,Market price
+land_appreciation_rate,0.03,0.03,0.035,0.035,0.04,0.04,0.045,0.045,0.05,0.05,Annual rate
+green_prints_premium,0,0.15,0.18,0.20,0.22,0.25,0.25,0.25,0.25,0.25,AI valuation uplift

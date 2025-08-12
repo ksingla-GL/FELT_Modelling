@@ -1,0 +1,11 @@
+parameter,value,notes
+num_farms,10,Initial portfolio size
+land_cost_per_farm,10000000,$10M per 1000 hectares
+project_dev_cost,4000000,40% of land cost
+total_cost_per_farm,14000000,Turnkey cost
+total_investment,140000000,$140M gross raise
+fundraising_fee_pct,0.05,5% upfront fee
+net_investment,133000000,After fundraising fee
+initial_token_supply,133000000,Tokens = Net Investment for $1.00 starting price
+discount_rate,0.08,8% NPV discount
+operator_salary_cap,250000,Maximum operator payment per farm

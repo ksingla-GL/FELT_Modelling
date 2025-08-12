@@ -1,0 +1,8 @@
+stakeholder,percentage,payment_frequency,notes
+expert_fees,0.05,annual,"Technical experts, agronomists"
+supplier_costs,0.35,annual,"Seeds, equipment, materials"
+operator_fees,0.10,annual,Farm operator base percentage
+project_development,0.15,annual,FEAG profit (PDF)
+fund_administration,0.03,annual,"Legal, accounting, compliance"
+treasury_pretax,0.32,annual,Retained for growth
+corporate_tax_rate,0.30,on_treasury,Tax on treasury portion

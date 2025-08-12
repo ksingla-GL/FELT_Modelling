@@ -1,0 +1,7 @@
+parameter,value,notes
+accu_spot_price,45,Current spot market
+accu_forward_price,35,1-2 year forward
+forward_discount,0.222,22.2% discount to spot
+vcu_international_price,25,Voluntary carbon units
+price_growth_rate,0.04,Annual price appreciation
+forward_commitment_years,2,Forward sale period
