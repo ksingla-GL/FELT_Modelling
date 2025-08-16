@@ -1,8 +1,0 @@
-stakeholder,percentage,payment_frequency,notes
-expert_fees,0.02,Annual,Agricultural experts
-supplier_costs,0.15,Annual,Equipment and supplies
-operator_fees,0.06,Annual,Farm operators (capped)
-project_development,0.15,Annual,FEAG profit (PDF)
-fund_administration,0.02,Annual,Trust administration
-treasury_pretax,0.6,Annual,Growth capital
-corporate_tax_rate,0.3,On Treasury,Corporate tax rate

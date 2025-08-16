@@ -1,8 +1,0 @@
-parameter,value,notes
-accu_spot_price,55.0,ACCU spot price
-accu_forward_price,44.0,Forward price
-forward_discount_rate,0.2,Forward discount
-biodiversity_base_price,4000.0,Biodiversity price
-water_credit_price,2500.0,Water credit price
-beef_price_per_head,5000.0,Beef revenue per head
-price_growth_rate,0.06,Annual price growth
