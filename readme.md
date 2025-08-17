@@ -11,6 +11,67 @@
 
 ---
 
+## Dashboard Setup & Launch
+
+### Prerequisites
+Ensure Python 3.8 or higher is installed on your system. To check:
+- **Windows**: Open Command Prompt and type `python --version`
+- **Mac**: Open Terminal and type `python3 --version`
+
+If Python is not installed, download from [python.org](https://www.python.org/downloads/)
+
+### Installation Steps
+
+#### Windows (Command Prompt)
+```bash
+# Navigate to the project folder
+cd path\to\FELT_Token_Model
+
+# Install required packages
+pip install streamlit pandas numpy plotly
+
+# Run the dashboard
+streamlit run db.py
+Mac/Linux (Terminal)
+bash# Navigate to the project folder
+cd path/to/FELT_Token_Model
+
+# Install required packages
+pip3 install streamlit pandas numpy plotly
+
+# Run the dashboard
+streamlit run db.py
+Accessing the Dashboard
+
+After running the command, you'll see output like:
+You can now view your Streamlit app in your browser.
+Local URL: http://localhost:8501
+Network URL: http://192.168.x.x:8501
+
+The dashboard will automatically open in your default browser
+If it doesn't open automatically, manually navigate to: http://localhost:8501
+
+### Dashboard Features
+
+Executive Dashboard: High-level KPIs and token metrics
+Farm Portfolio: Individual farm performance analysis
+Financial Analysis: P&L, NAV bridge, and treasury management
+Token Metrics: DCF valuation and price evolution
+Scenario Analysis: Compare different scenarios and sensitivity
+Model Inputs: View all input assumptions
+Detailed Reports: Export data and create custom analyses
+
+### Stopping the Dashboard
+
+Press Ctrl+C in the terminal/command prompt to stop the server
+
+### Troubleshooting
+
+"streamlit: command not found": Ensure streamlit is installed: pip install streamlit
+Port already in use: Another app is using port 8501. Stop it or use: streamlit run db.py --server.port 8502
+Module not found errors: Install missing packages: pip install pandas numpy plotly
+Can't find db.py: Ensure you're in the correct directory containing the db.py file
+
 ## Overview
 
 This model projects the financial performance of the FELT token over 10 years, simulating:

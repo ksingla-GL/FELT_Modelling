@@ -5,7 +5,7 @@ hectares_per_farm,1000
 land_appreciation_rate,0.04
 operator_salary_cap,250000
 corporate_tax_rate,0.25
-working_capital_reserve_pct,0.05
+working_capital_reserve_pct,0
 initial_token_supply,140000000
 initial_raise,140000000
 funding_policy,strict_10
