@@ -50,7 +50,7 @@ Network URL: http://192.168.x.x:8501
 
 The dashboard will automatically open in your default browser
 If it doesn't open automatically, manually navigate to: http://localhost:8501
-
+```
 ### Dashboard Features
 
 Executive Dashboard: High-level KPIs and token metrics
