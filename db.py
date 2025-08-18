@@ -618,12 +618,22 @@ def create_real_stakeholder_flows(df):
     return df[available_cols].copy() if available_cols else df[['year']].copy()
 
 # Page configuration
-st.set_page_config(
-    page_title="FELT Token Dashboard",
-    page_icon="🌱",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+try:
+    # Try to use logo as page icon
+    st.set_page_config(
+        page_title="FELT Token Dashboard",
+        page_icon="assets/logo.png",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+except:
+    # Fallback to emoji if logo doesn't work as icon
+    st.set_page_config(
+        page_title="FELT Token Dashboard",
+        page_icon="🌱",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
 
 # Custom CSS for better styling (unchanged)
 st.markdown("""
@@ -796,6 +806,16 @@ def safe_get(df, column, default=0):
 
 # SIDEBAR
 with st.sidebar:
+    # Logo in sidebar
+    try:
+        st.image("assets/logo.png", width=180)
+    except:
+        # Fallback if logo not found
+        try:
+            st.image("2025_Ag Logo_Picture1.png", width=180)
+        except:
+            pass  # No logo available
+    
     st.markdown("# 🌱 FELT Token")
     st.markdown("### Navigation")
     
@@ -840,7 +860,15 @@ with st.sidebar:
 
 # MAIN CONTENT
 if page == "📊 Executive Dashboard":
-    # Header
+    # Header with Logo
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        try:
+            st.image("assets/logo.png", width=300)
+        except:
+            # Fallback if logo not found
+            st.image("2025_Ag Logo_Picture1.png", width=300)
+    
     st.markdown('<h1 class="main-header">FELT Token Financial Model</h1>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Fresh Earth Land Token - Regenerative Agriculture Investment Platform</p>', unsafe_allow_html=True)
     
