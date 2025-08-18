@@ -22,25 +22,17 @@ If Python is not installed, download from [python.org](https://www.python.org/do
 
 ### Installation Steps
 
-#### Windows (Command Prompt)
-```bash
-# Navigate to the project folder
-cd path\to\FELT_Token_Model
-
-# Install required packages
-pip install streamlit pandas numpy plotly
-
-# Run the dashboard
-streamlit run db.py
 Mac/Linux (Terminal)
-bash# Navigate to the project folder
+
+Navigate to the project folder
 cd Desktop/FELT_Modelling-main
 
-# Install required packages
+# Install required packages (If already completed, ignore this)
 pip3 install streamlit pandas numpy plotly
 
 # Run the dashboard
 streamlit run db.py
+
 Accessing the Dashboard
 
 After running the command, you'll see output like:
