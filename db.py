@@ -536,10 +536,9 @@ def run_model(input_data):
             'stakeholder': create_real_stakeholder_flows(df)
         }
         
-        # Run scenario analysis
+        # Run scenario analysis (suppress UI messages)
         if ScenarioEngine:
             try:
-                st.info("Running scenario analysis...")
                 scenario_engine = ScenarioEngine()
                 
                 # Run scenarios (Conservative, Base, Aggressive)
@@ -554,14 +553,13 @@ def run_model(input_data):
                 monte_stats_df = run_fast_monte_carlo(scenario_engine, 25)
                 if monte_stats_df is not None:
                     outputs['monte_carlo_stats'] = monte_stats_df
-                
-                st.success("✅ Scenario analysis completed!")
+                    outputs['monte_carlo'] = monte_stats_df  # Also save as 'monte_carlo' for dashboard compatibility
                 
             except Exception as e:
-                st.warning(f"Scenario analysis failed: {str(e)}")
-                # Continue without scenario data
+                # Silently continue without scenario data
+                pass
         else:
-            st.warning("ScenarioEngine not available - using static scenario files")
+            pass
         
         return outputs
         
@@ -721,8 +719,6 @@ def run_fast_monte_carlo(scenario_engine, n_simulations=25):
     import threading
     from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
     
-    st.info(f"Running {n_simulations} Monte Carlo simulations...")
-    
     def run_single_simulation(sim_id):
         """Run a single Monte Carlo simulation with timeout protection"""
         try:
@@ -752,14 +748,9 @@ def run_fast_monte_carlo(scenario_engine, n_simulations=25):
                 'self_funding': df[df['self_funding_capable']]['year'].min() if any(df['self_funding_capable']) else 0
             }
         except Exception as e:
-            st.warning(f"Simulation {sim_id + 1} failed: {str(e)}")
             return None
     
     try:
-        # Progress tracking
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
         results = []
         completed = 0
         
@@ -779,23 +770,12 @@ def run_fast_monte_carlo(scenario_engine, n_simulations=25):
                         results.append(result)
                     completed += 1
                     
-                    # Update progress
-                    progress = completed / n_simulations
-                    progress_bar.progress(progress)
-                    status_text.text(f"Completed {completed}/{n_simulations} simulations")
-                    
                 except TimeoutError:
-                    st.warning(f"Simulation {future_to_sim[future] + 1} timed out")
                     completed += 1
                 except Exception as e:
-                    st.warning(f"Simulation {future_to_sim[future] + 1} error: {str(e)}")
                     completed += 1
         
-        progress_bar.empty()
-        status_text.empty()
-        
         if len(results) < 5:  # Need at least 5 successful simulations
-            st.error(f"Only {len(results)} simulations completed successfully. Need at least 5.")
             return None
             
         # Calculate statistics
@@ -840,14 +820,11 @@ def run_fast_monte_carlo(scenario_engine, n_simulations=25):
             ]
         })
         
-        st.success(f"✅ {len(results)}/{n_simulations} Monte Carlo simulations completed!")
         return stats
         
     except TimeoutError:
-        st.error("Monte Carlo analysis timed out after 2 minutes")
         return None
     except Exception as e:
-        st.error(f"Monte Carlo analysis failed: {str(e)}")
         return None
 
 # Load all data files with error handling
