@@ -34,7 +34,7 @@ pip install streamlit pandas numpy plotly
 streamlit run db.py
 Mac/Linux (Terminal)
 bash# Navigate to the project folder
-cd path/to/FELT_Token_Model
+cd Desktop/FELT_Modelling-main
 
 # Install required packages
 pip3 install streamlit pandas numpy plotly
