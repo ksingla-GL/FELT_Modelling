@@ -550,10 +550,11 @@ def run_model(input_data):
                 outputs['sensitivity'] = sensitivity_df
                 
                 # Run fast Monte Carlo with timeout protection
-                monte_stats_df = run_fast_monte_carlo(scenario_engine, 25)
-                if monte_stats_df is not None:
-                    outputs['monte_carlo_stats'] = monte_stats_df
-                    outputs['monte_carlo'] = monte_stats_df  # Also save as 'monte_carlo' for dashboard compatibility
+                monte_result = run_fast_monte_carlo(scenario_engine, 25)
+                if monte_result is not None:
+                    monte_carlo_df, monte_stats_df = monte_result
+                    outputs['monte_carlo'] = monte_carlo_df  # Raw simulation data
+                    outputs['monte_stats'] = monte_stats_df  # Statistics summary
                 
             except Exception as e:
                 # Silently continue without scenario data
@@ -820,7 +821,7 @@ def run_fast_monte_carlo(scenario_engine, n_simulations=25):
             ]
         })
         
-        return stats
+        return monte_carlo_df, stats  # Return BOTH raw data and statistics
         
     except TimeoutError:
         return None
