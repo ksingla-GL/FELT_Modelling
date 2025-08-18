@@ -20,10 +20,12 @@ warnings.filterwarnings('ignore')
 sys.path.append('Raw_code')
 try:
     from core_model import FELTModel, CoP, STREAMS
+    from scenario_engine import ScenarioEngine
 except ImportError:
     # Fallback if import fails
     FELTModel = None
     CoP = None
+    ScenarioEngine = None
     STREAMS = ['forestry', 'soil', 'biodiversity', 'beef', 'water']
 
 # Google Sheets URLs - Your actual sheet URLs
@@ -533,6 +535,32 @@ def run_model(input_data):
             'token_metrics': df[['year', 'total_nav', 'tokens_outstanding', 'token_price', 'standard_token_price', 'dcf_premium']].copy(),
             'stakeholder': create_real_stakeholder_flows(df)
         }
+        
+        # Run scenario analysis
+        if ScenarioEngine:
+            try:
+                st.info("Running scenario analysis...")
+                scenario_engine = ScenarioEngine()
+                
+                # Run scenarios (Conservative, Base, Aggressive)
+                scenarios_df = scenario_engine.run_scenarios()
+                outputs['scenarios'] = scenarios_df
+                
+                # Run sensitivity analysis
+                sensitivity_df = scenario_engine.run_sensitivity() 
+                outputs['sensitivity'] = sensitivity_df
+                
+                # Run Monte Carlo (smaller sample for dashboard speed)
+                monte_stats_df = scenario_engine.run_monte_carlo(50)
+                outputs['monte_carlo_stats'] = monte_stats_df
+                
+                st.success("✅ Scenario analysis completed!")
+                
+            except Exception as e:
+                st.warning(f"Scenario analysis failed: {str(e)}")
+                # Continue without scenario data
+        else:
+            st.warning("ScenarioEngine not available - using static scenario files")
         
         return outputs
         
