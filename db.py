@@ -550,9 +550,10 @@ def run_model(input_data):
                 sensitivity_df = scenario_engine.run_sensitivity() 
                 outputs['sensitivity'] = sensitivity_df
                 
-                # Run Monte Carlo (smaller sample for dashboard speed)
-                monte_stats_df = scenario_engine.run_monte_carlo(50)
-                outputs['monte_carlo_stats'] = monte_stats_df
+                # Run fast Monte Carlo with timeout protection
+                monte_stats_df = run_fast_monte_carlo(scenario_engine, 25)
+                if monte_stats_df is not None:
+                    outputs['monte_carlo_stats'] = monte_stats_df
                 
                 st.success("✅ Scenario analysis completed!")
                 
@@ -713,6 +714,141 @@ if 'selected_farm' not in st.session_state:
     st.session_state.selected_farm = None
 if 'selected_scenario' not in st.session_state:
     st.session_state.selected_scenario = 'Base'
+
+def run_fast_monte_carlo(scenario_engine, n_simulations=25):
+    """Fast Monte Carlo with timeout protection and error handling"""
+    import time
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+    
+    st.info(f"Running {n_simulations} Monte Carlo simulations...")
+    
+    def run_single_simulation(sim_id):
+        """Run a single Monte Carlo simulation with timeout protection"""
+        try:
+            # Create random adjustments within reasonable ranges
+            adjustments = {
+                'prices.forestry': np.random.uniform(35, 55),
+                'prices.soil': np.random.uniform(35, 55),
+                'prices.biodiversity': np.random.uniform(9000, 15000),
+                'prices.beef': np.random.uniform(3500, 4500),
+                'prices.water': np.random.uniform(4000, 6000),
+                'revenue_scale': np.random.uniform(0.8, 1.2),
+                'land_appreciation_rate': np.random.uniform(0.03, 0.05),
+                'corporate_tax_rate': np.random.uniform(0.25, 0.35)
+            }
+            
+            # Run model with random parameters
+            model = FELTModel()
+            model = scenario_engine.modify_model(model, adjustments)
+            df = model.run()
+            
+            year_10 = df.iloc[-1]
+            
+            return {
+                'simulation': sim_id + 1,
+                'token_price': year_10['token_price'],
+                'nav': year_10['total_nav'],
+                'self_funding': df[df['self_funding_capable']]['year'].min() if any(df['self_funding_capable']) else 0
+            }
+        except Exception as e:
+            st.warning(f"Simulation {sim_id + 1} failed: {str(e)}")
+            return None
+    
+    try:
+        # Progress tracking
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        results = []
+        completed = 0
+        
+        # Use ThreadPoolExecutor for parallel execution with timeout
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            # Submit all simulations
+            future_to_sim = {
+                executor.submit(run_single_simulation, sim): sim 
+                for sim in range(n_simulations)
+            }
+            
+            # Process completed simulations with timeout
+            for future in as_completed(future_to_sim, timeout=120):  # 2 minute total timeout
+                try:
+                    result = future.result(timeout=10)  # 10 second per simulation timeout
+                    if result:
+                        results.append(result)
+                    completed += 1
+                    
+                    # Update progress
+                    progress = completed / n_simulations
+                    progress_bar.progress(progress)
+                    status_text.text(f"Completed {completed}/{n_simulations} simulations")
+                    
+                except TimeoutError:
+                    st.warning(f"Simulation {future_to_sim[future] + 1} timed out")
+                    completed += 1
+                except Exception as e:
+                    st.warning(f"Simulation {future_to_sim[future] + 1} error: {str(e)}")
+                    completed += 1
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        if len(results) < 5:  # Need at least 5 successful simulations
+            st.error(f"Only {len(results)} simulations completed successfully. Need at least 5.")
+            return None
+            
+        # Calculate statistics
+        monte_carlo_df = pd.DataFrame(results)
+        
+        stats = pd.DataFrame({
+            'metric': ['Token Price', 'NAV', 'Self-Funding Year'],
+            'mean': [
+                monte_carlo_df['token_price'].mean(),
+                monte_carlo_df['nav'].mean(),
+                monte_carlo_df['self_funding'].mean()
+            ],
+            'std': [
+                monte_carlo_df['token_price'].std(),
+                monte_carlo_df['nav'].std(),
+                monte_carlo_df['self_funding'].std()
+            ],
+            'min': [
+                monte_carlo_df['token_price'].min(),
+                monte_carlo_df['nav'].min(),
+                monte_carlo_df['self_funding'].min()
+            ],
+            'p25': [
+                monte_carlo_df['token_price'].quantile(0.25),
+                monte_carlo_df['nav'].quantile(0.25),
+                monte_carlo_df['self_funding'].quantile(0.25)
+            ],
+            'median': [
+                monte_carlo_df['token_price'].median(),
+                monte_carlo_df['nav'].median(),
+                monte_carlo_df['self_funding'].median()
+            ],
+            'p75': [
+                monte_carlo_df['token_price'].quantile(0.75),
+                monte_carlo_df['nav'].quantile(0.75),
+                monte_carlo_df['self_funding'].quantile(0.75)
+            ],
+            'max': [
+                monte_carlo_df['token_price'].max(),
+                monte_carlo_df['nav'].max(),
+                monte_carlo_df['self_funding'].max()
+            ]
+        })
+        
+        st.success(f"✅ {len(results)}/{n_simulations} Monte Carlo simulations completed!")
+        return stats
+        
+    except TimeoutError:
+        st.error("Monte Carlo analysis timed out after 2 minutes")
+        return None
+    except Exception as e:
+        st.error(f"Monte Carlo analysis failed: {str(e)}")
+        return None
 
 # Load all data files with error handling
 @st.cache_data(ttl=60)
