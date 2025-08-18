@@ -11,6 +11,611 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import os
 from datetime import datetime
+import hashlib
+import sys
+import warnings
+warnings.filterwarnings('ignore')
+
+# Import model classes from Raw_code
+sys.path.append('Raw_code')
+try:
+    from core_model import FELTModel, CoP, STREAMS
+except ImportError:
+    # Fallback if import fails
+    FELTModel = None
+    CoP = None
+    STREAMS = ['forestry', 'soil', 'biodiversity', 'beef', 'water']
+
+# Google Sheets URLs - Your actual sheet URLs
+GOOGLE_SHEETS_URLS = {
+    'portfolio_config': 'https://docs.google.com/spreadsheets/d/10_FypmxtPDT46Ay9rNz4lPk9CYSr_QzTutv3xKaYU3o/export?format=csv',
+    'acquisition_mix': 'https://docs.google.com/spreadsheets/d/1nz6oVeYcS7ocE8_kyfCa4DrXx1L8F-vzmy3_Qy1huJQ/export?format=csv', 
+    'cop_revenue': 'https://docs.google.com/spreadsheets/d/1OupIxigcvc9R3-bWu13s20Y1GcjdJ4fHnrijKHlRVgI/export?format=csv',
+    'cost_structure': 'https://docs.google.com/spreadsheets/d/1WnkJVwiQV_hsACNHOqPGFWXGnEITTb-78sscPifJ6S8/export?format=csv',
+    'market_prices': 'https://docs.google.com/spreadsheets/d/1j6Vr8TM4jKBLHMuDzV_rlAO2c80m3V575anAVhwM7_0/export?format=csv'
+}
+
+def load_from_google_sheets(url, sheet_name):
+    """Load data from Google Sheets"""
+    try:
+        return pd.read_csv(url)
+    except Exception as e:
+        st.warning(f"Could not load from Google Sheets {sheet_name}: {str(e)}")
+        return pd.DataFrame()
+
+# Real model classes implementation
+class CoP:
+    """Change of Practice (farm) entity - REAL implementation"""
+    
+    def __init__(self, cop_id, cop_type, acquisition_year, hectares, land_cost, dev_cost):
+        self.id = cop_id
+        self.type = cop_type
+        self.a_year = acquisition_year
+        self.hectares = hectares
+        self.land_fmv = land_cost + dev_cost
+        self.initial_cost = land_cost + dev_cost
+        self.cum_profit = 0.0
+        self.ledger = []
+        
+    def compute_year(self, year, prices, costs, caps, tax_rate, revenue_lookup, green_prints_params):
+        """Compute farm P&L for given year - REAL implementation"""
+        age = year - self.a_year + 1
+        if age < 1 or age > 10:
+            return None
+            
+        # Gross revenue by stream
+        gross = 0.0
+        streams = {}
+        
+        for stream in STREAMS:
+            units_per_ha = revenue_lookup.get((self.type, stream, age), 0)
+            units = units_per_ha * self.hectares
+            price = prices.get((stream, year), 0)
+            rev = units * price
+            streams[stream] = rev
+            gross += rev
+            
+        # Stakeholder splits
+        pays = {k: costs[k] * gross for k in costs.keys()}
+        
+        # Operator cap
+        op_paid = min(pays.get('operator', 0), caps['operator_salary_cap'])
+        op_over = max(pays.get('operator', 0) - op_paid, 0.0)
+        
+        # Pre-tax treasury
+        t_pre = pays.get('treasury_pretax', 0) + op_over
+        
+        # Tax & net-to-treasury
+        tax = tax_rate * t_pre
+        ntt = t_pre - tax
+        self.cum_profit += ntt
+        
+        # Land value update - REAL Green Prints logic
+        base_appreciation = caps['land_appreciation_rate']
+        
+        # Calculate incremental premium
+        prem_t = 0.0
+        if age >= green_prints_params['start_age']:
+            ramp = min(1.0, (age - green_prints_params['start_age'] + 1) / green_prints_params['ramp_years'])
+            prem_t = green_prints_params['max_premium'] * ramp
+            
+        prem_prev = 0.0
+        if age - 1 >= green_prints_params['start_age']:
+            ramp_prev = min(1.0, (age - 1 - green_prints_params['start_age'] + 1) / green_prints_params['ramp_years'])
+            prem_prev = green_prints_params['max_premium'] * ramp_prev
+            
+        # Apply incremental change only
+        premium_multiplier = (1 + prem_t) / (1 + prem_prev) if prem_prev > 0 or prem_t > 0 else 1.0
+        self.land_fmv *= (1 + base_appreciation) * premium_multiplier
+        
+        row = {
+            'year': year,
+            'age': age,
+            'gross': gross,
+            'gross_forestry': streams.get('forestry', 0),
+            'gross_soil': streams.get('soil', 0),
+            'gross_biodiversity': streams.get('biodiversity', 0),
+            'gross_beef': streams.get('beef', 0),
+            'gross_water': streams.get('water', 0),
+            'pdf_fee': pays.get('project_development', 0),
+            'expert_fee': pays.get('expert', 0),
+            'supplier_costs': pays.get('supplier', 0),
+            'admin': pays.get('admin', 0),
+            'operator_paid': op_paid,
+            'operator_overflow': op_over,
+            'treasury_pretax': t_pre,
+            'tax': tax,
+            'net_to_treasury': ntt,
+            'cum_profit': self.cum_profit,
+            'land_fmv': self.land_fmv
+        }
+        
+        self.ledger.append(row)
+        return row
+
+def calculate_input_hash(input_data):
+    """Calculate hash of input data to detect changes"""
+    hash_str = ""
+    for key in sorted(input_data.keys()):
+        if isinstance(input_data[key], pd.DataFrame):
+            hash_str += f"{key}:{input_data[key].to_string()}"
+        else:
+            hash_str += f"{key}:{str(input_data[key])}"
+    return hashlib.md5(hash_str.encode()).hexdigest()
+
+class CustomFELTModel:
+    """Custom FELT model that accepts DataFrames as inputs"""
+    
+    def __init__(self, input_data):
+        self.input_data = input_data
+        self.load_inputs()
+        self.farms = []
+        self.treasury = 0.0
+        self.tokens_outstanding = 0.0
+        self.farm_counter = 0
+        
+    def load_inputs(self):
+        """Load inputs from provided DataFrames"""
+        # Portfolio config
+        if 'portfolio_config' in self.input_data and not self.input_data['portfolio_config'].empty:
+            portfolio_df = self.input_data['portfolio_config']
+            self.portfolio = {}
+            for _, row in portfolio_df.iterrows():
+                param = row['parameter']
+                value = row['value']
+                # Convert numeric parameters to float
+                if param in ['land_cost_per_farm', 'dev_cost_per_farm', 'hectares_per_farm',
+                            'land_appreciation_rate', 'operator_salary_cap', 'corporate_tax_rate',
+                            'working_capital_reserve_pct', 'initial_token_supply', 'initial_raise',
+                            'issuance_premium', 'green_prints_start_age', 'green_prints_max_premium',
+                            'green_prints_ramp_years', 'discount_rate', 'growth_rate_yr1_2',
+                            'growth_rate_yr3_5', 'growth_rate_yr6_8', 'growth_rate_yr9_10',
+                            'terminal_growth', 'dcf_horizon']:
+                    self.portfolio[param] = float(value)
+                else:
+                    self.portfolio[param] = value
+        else:
+            st.error("Portfolio configuration data missing")
+            return
+        
+        # Acquisition mix
+        if 'acquisition_mix' in self.input_data and not self.input_data['acquisition_mix'].empty:
+            self.acquisition_mix = self.input_data['acquisition_mix']
+        else:
+            st.error("Acquisition mix data missing")
+            return
+        
+        # Revenue timelines
+        if 'cop_revenue' in self.input_data and not self.input_data['cop_revenue'].empty:
+            revenue_df = self.input_data['cop_revenue']
+            self.revenue_lookup = {}
+            for _, row in revenue_df.iterrows():
+                key = (row['cop_type'], row['stream'], int(row['operational_age']))
+                self.revenue_lookup[key] = float(row['units_per_hectare'])
+        else:
+            st.error("Revenue timeline data missing")
+            return
+        
+        # Cost structure
+        if 'cost_structure' in self.input_data and not self.input_data['cost_structure'].empty:
+            cost_df = self.input_data['cost_structure']
+            self.costs = {}
+            for _, row in cost_df.iterrows():
+                self.costs[row['stakeholder']] = float(row['percentage'])
+        else:
+            st.error("Cost structure data missing")
+            return
+        
+        # Market prices
+        if 'market_prices' in self.input_data and not self.input_data['market_prices'].empty:
+            prices_df = self.input_data['market_prices']
+            self.base_prices = {}
+            self.price_growth = {}
+            for _, row in prices_df.iterrows():
+                self.base_prices[row['asset']] = float(row['spot_price'])
+                self.price_growth[row['asset']] = float(row['annual_growth_rate'])
+                
+            # Calculate prices for all years
+            self.prices = {}
+            for asset in self.base_prices:
+                for year in range(1, 11):
+                    price = self.base_prices[asset] * (1 + self.price_growth[asset]) ** (year - 1)
+                    self.prices[(asset, year)] = price
+        else:
+            st.error("Market prices data missing")
+            return
+        
+        # Green Prints parameters
+        self.green_prints = {
+            'start_age': int(self.portfolio.get('green_prints_start_age', 3)),
+            'max_premium': float(self.portfolio.get('green_prints_max_premium', 0.15)),
+            'ramp_years': int(self.portfolio.get('green_prints_ramp_years', 4))
+        }
+        
+        # Caps
+        self.caps = {
+            'operator_salary_cap': float(self.portfolio['operator_salary_cap']),
+            'land_appreciation_rate': float(self.portfolio['land_appreciation_rate'])
+        }
+    
+    def calculate_nav(self):
+        """Calculate total NAV = Land + Treasury"""
+        land_nav = sum(farm.land_fmv for farm in self.farms)
+        treasury_nav = self.treasury
+        return land_nav + treasury_nav
+    
+    def calculate_dcf_token_value(self, year, current_nav, current_treasury):
+        """Calculate token value using DCF of future cash flows - REAL implementation"""
+        
+        # Get DCF parameters
+        discount_rate = float(self.portfolio.get('discount_rate', 0.08))
+        growth_rates = {
+            (1, 2): float(self.portfolio.get('growth_rate_yr1_2', 0.25)),
+            (3, 5): float(self.portfolio.get('growth_rate_yr3_5', 0.20)),
+            (6, 8): float(self.portfolio.get('growth_rate_yr6_8', 0.15)),
+            (9, 10): float(self.portfolio.get('growth_rate_yr9_10', 0.10))
+        }
+        terminal_growth = float(self.portfolio.get('terminal_growth', 0.03))
+        
+        # Determine growth rate for current year
+        current_growth = 0.10  # default
+        for (start, end), rate in growth_rates.items():
+            if start <= year <= end:
+                current_growth = rate
+                break
+        
+        # Estimate annual cash flow based on current treasury growth
+        base_cash_flow = current_treasury * 0.224  # 22.4% net margin assumption
+        
+        # Calculate PV of future cash flows for next 10 years
+        pv_future_cash = 0
+        for t in range(1, 11):
+            future_year = year + t
+            
+            # Determine growth rate for future year
+            if future_year <= 2:
+                g = growth_rates[(1, 2)]
+            elif future_year <= 5:
+                g = growth_rates[(3, 5)]
+            elif future_year <= 8:
+                g = growth_rates[(6, 8)]
+            elif future_year <= 10:
+                g = growth_rates[(9, 10)]
+            else:
+                g = terminal_growth
+            
+            # Project cash flow
+            projected_cf = base_cash_flow * ((1 + g) ** t)
+            
+            # Discount to present value
+            pv = projected_cf / ((1 + discount_rate) ** t)
+            pv_future_cash += pv
+        
+        # Add terminal value (Gordon growth model) for cash flows beyond year 10
+        terminal_cf = base_cash_flow * ((1 + terminal_growth) ** 11)
+        terminal_value = terminal_cf / (discount_rate - terminal_growth)
+        pv_terminal = terminal_value / ((1 + discount_rate) ** 10)
+        
+        # Total DCF value
+        dcf_nav = current_nav + pv_future_cash + pv_terminal
+        
+        # Token value
+        if self.tokens_outstanding > 0:
+            dcf_token_price = dcf_nav / self.tokens_outstanding
+        else:
+            dcf_token_price = 1.0
+            
+        return dcf_token_price, pv_future_cash
+    
+    def acquire_batch(self, year):
+        """Acquire farms with REAL treasury handling"""
+        # Get mix for this year
+        if year <= len(self.acquisition_mix):
+            mix = self.acquisition_mix.iloc[year - 1]
+            low_count = int(mix['low_cops'])
+            med_count = int(mix['medium_cops'])
+            high_count = int(mix['high_cops'])
+        else:
+            low_count, med_count, high_count = 4, 3, 3
+            
+        total_farms = low_count + med_count + high_count
+        unit_cost = self.portfolio['land_cost_per_farm'] + self.portfolio['dev_cost_per_farm']
+        batch_cost = total_farms * unit_cost
+        
+        farms_acquired = []
+        capital_raised = 0.0
+        new_tokens = 0.0
+        funding_source = 'none'
+        
+        # REAL capital and treasury handling
+        if year == 1:
+            # Year 1: Initial raise
+            capital_raised = self.portfolio['initial_raise']
+            new_tokens = self.portfolio['initial_token_supply']
+            self.tokens_outstanding = new_tokens
+            
+            # Add capital to treasury
+            self.treasury += capital_raised
+            
+            # PAY FOR FARMS FROM TREASURY
+            self.treasury -= batch_cost
+            
+            funding_source = 'initial_raise'
+            
+        else:
+            # Years 2+: Check if we can self-fund
+            available = self.treasury * (1 - self.portfolio['working_capital_reserve_pct'])
+            
+            if available >= batch_cost:
+                # Self-funding from treasury
+                self.treasury -= batch_cost
+                funding_source = 'treasury'
+                
+            else:
+                # Need to raise capital
+                funding_gap = batch_cost - available
+                
+                # Calculate token price at current NAV
+                current_nav = self.calculate_nav()
+                token_price = (current_nav / self.tokens_outstanding) if self.tokens_outstanding > 0 else 1.0
+                issue_price = token_price * (1 + self.portfolio.get('issuance_premium', 0.0))
+                
+                capital_raised = funding_gap
+                new_tokens = capital_raised / issue_price
+                self.tokens_outstanding += new_tokens
+                
+                # Add new capital to treasury, then pay for farms
+                self.treasury += capital_raised
+                self.treasury -= batch_cost
+                
+                funding_source = 'mixed' if available > 0 else 'equity'
+        
+        # Create REAL farms
+        for _ in range(low_count):
+            self.farm_counter += 1
+            farm = CoP(
+                cop_id=f"F{self.farm_counter:03d}",
+                cop_type='low',
+                acquisition_year=year,
+                hectares=self.portfolio['hectares_per_farm'],
+                land_cost=self.portfolio['land_cost_per_farm'],
+                dev_cost=self.portfolio['dev_cost_per_farm']
+            )
+            self.farms.append(farm)
+            farms_acquired.append(farm)
+            
+        for _ in range(med_count):
+            self.farm_counter += 1
+            farm = CoP(
+                cop_id=f"F{self.farm_counter:03d}",
+                cop_type='medium',
+                acquisition_year=year,
+                hectares=self.portfolio['hectares_per_farm'],
+                land_cost=self.portfolio['land_cost_per_farm'],
+                dev_cost=self.portfolio['dev_cost_per_farm']
+            )
+            self.farms.append(farm)
+            farms_acquired.append(farm)
+            
+        for _ in range(high_count):
+            self.farm_counter += 1
+            farm = CoP(
+                cop_id=f"F{self.farm_counter:03d}",
+                cop_type='high',
+                acquisition_year=year,
+                hectares=self.portfolio['hectares_per_farm'],
+                land_cost=self.portfolio['land_cost_per_farm'],
+                dev_cost=self.portfolio['dev_cost_per_farm']
+            )
+            self.farms.append(farm)
+            farms_acquired.append(farm)
+            
+        return {
+            'farms_acquired': farms_acquired,
+            'capital_raised': capital_raised,
+            'new_tokens': new_tokens,
+            'funding_source': funding_source,
+            'farms_count': len(farms_acquired)
+        }
+
+def run_model(input_data):
+    """Run the REAL FELT model with provided input data"""
+    try:
+        # Create and run the REAL model
+        model = CustomFELTModel(input_data)
+        
+        # Run 10-year projection with REAL accounting (copied from core_model.py)
+        results = []
+        
+        for year in range(1, 11):
+            year_data = {
+                'year': year,
+                'opening_farms': len(model.farms),
+                'opening_treasury': model.treasury,
+                'opening_nav': 0 if year == 1 else model.calculate_nav()
+            }
+            
+            # Acquire farms at start of year - REAL implementation
+            acquisition = model.acquire_batch(year)
+            year_data['farms_acquired'] = acquisition['farms_count']
+            year_data['capital_raised'] = acquisition['capital_raised']
+            year_data['new_tokens'] = acquisition['new_tokens']
+            year_data['funding_source'] = acquisition['funding_source']
+            
+            # Process all farms for the year - REAL revenue calculation
+            farm_results = []
+            for farm in model.farms:
+                result = farm.compute_year(
+                    year, 
+                    model.prices, 
+                    model.costs, 
+                    model.caps,
+                    model.portfolio['corporate_tax_rate'],
+                    model.revenue_lookup,
+                    model.green_prints
+                )
+                if result:
+                    farm_results.append(result)
+                    
+            # Aggregate results - REAL calculations
+            if farm_results:
+                year_data['gross_revenue'] = sum(r['gross'] for r in farm_results)
+                year_data['pdf_total'] = sum(r['pdf_fee'] for r in farm_results)
+                year_data['expert_total'] = sum(r['expert_fee'] for r in farm_results)
+                year_data['supplier_total'] = sum(r['supplier_costs'] for r in farm_results)
+                year_data['admin_total'] = sum(r['admin'] for r in farm_results)
+                year_data['operator_paid_total'] = sum(r['operator_paid'] for r in farm_results)
+                year_data['operator_overflow_total'] = sum(r['operator_overflow'] for r in farm_results)
+                year_data['treasury_pretax_total'] = sum(r['treasury_pretax'] for r in farm_results)
+                year_data['tax_total'] = sum(r['tax'] for r in farm_results)
+                year_data['net_to_treasury'] = sum(r['net_to_treasury'] for r in farm_results)
+                
+                # Add to treasury - REAL treasury management
+                model.treasury += year_data['net_to_treasury']
+            else:
+                for key in ['gross_revenue', 'pdf_total', 'expert_total', 'supplier_total',
+                          'admin_total', 'operator_paid_total', 'operator_overflow_total',
+                          'treasury_pretax_total', 'tax_total', 'net_to_treasury']:
+                    year_data[key] = 0
+                    
+            # End of year metrics - REAL calculations
+            year_data['closing_farms'] = len(model.farms)
+            year_data['closing_treasury'] = model.treasury
+            year_data['land_nav'] = sum(farm.land_fmv for farm in model.farms)
+            year_data['treasury_nav'] = model.treasury
+            year_data['total_nav'] = year_data['land_nav'] + year_data['treasury_nav']
+            year_data['tokens_outstanding'] = model.tokens_outstanding
+            
+            # Calculate both standard and DCF token prices - REAL DCF implementation
+            standard_token_price = (year_data['total_nav'] / model.tokens_outstanding 
+                                   if model.tokens_outstanding > 0 else 1.0)
+            
+            # Calculate DCF-based token price - REAL DCF calculation
+            dcf_token_price, pv_future = model.calculate_dcf_token_value(
+                year, 
+                year_data['total_nav'],
+                year_data['treasury_nav']
+            )
+            
+            # Use DCF price as primary token price
+            year_data['token_price'] = dcf_token_price
+            year_data['standard_token_price'] = standard_token_price
+            year_data['pv_future_cash'] = pv_future
+            year_data['dcf_premium'] = (dcf_token_price / standard_token_price - 1) if standard_token_price > 0 else 0
+            
+            # Check self-funding threshold - REAL calculation
+            reserve_factor = 1 - model.portfolio['working_capital_reserve_pct']
+            next_year_cost = 10 * (model.portfolio['land_cost_per_farm'] + 
+                                  model.portfolio['dev_cost_per_farm'])
+            year_data['self_funding_capable'] = (model.treasury * reserve_factor >= next_year_cost)
+            
+            # Track cumulative profits - REAL farm profit tracking
+            if model.farms:
+                oldest_farms = sorted(model.farms, key=lambda f: f.a_year)[:10]
+                year_data['oldest_farm_cum_profit'] = oldest_farms[0].cum_profit if oldest_farms else 0
+                year_data['avg_cum_profit_first_10'] = (sum(f.cum_profit for f in oldest_farms) / 
+                                                        len(oldest_farms) if oldest_farms else 0)
+            else:
+                year_data['oldest_farm_cum_profit'] = 0
+                year_data['avg_cum_profit_first_10'] = 0
+                
+            results.append(year_data)
+            
+        # Convert to DataFrame
+        df = pd.DataFrame(results)
+        
+        # Generate REAL outputs
+        outputs = {
+            'portfolio': df,
+            'acquisition_mix': input_data['acquisition_mix'],
+            'farm_ledger': create_real_farm_ledger(model.farms),
+            'nav_recon': create_real_nav_reconciliation(df, model),
+            'token_metrics': df[['year', 'total_nav', 'tokens_outstanding', 'token_price', 'standard_token_price', 'dcf_premium']].copy(),
+            'stakeholder': create_real_stakeholder_flows(df)
+        }
+        
+        return outputs
+        
+    except Exception as e:
+        st.error(f"Model execution failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+def create_real_farm_ledger(farms):
+    """Create REAL farm ledger from actual farm data"""
+    ledger = []
+    for farm in farms:
+        for entry in farm.ledger:
+            row = {
+                'farm_id': farm.id,
+                'farm_type': farm.type,
+                'acquisition_year': farm.a_year,
+                **{k: v for k, v in entry.items()}
+            }
+            ledger.append(row)
+    return pd.DataFrame(ledger) if ledger else pd.DataFrame()
+
+def create_real_nav_reconciliation(df, model):
+    """Create REAL NAV reconciliation table"""
+    nav_recon = []
+    cost_per_farm = model.portfolio['land_cost_per_farm'] + model.portfolio['dev_cost_per_farm']
+    
+    for i, row in df.iterrows():
+        if i == 0:
+            # Year 1 - Start from zero
+            opening_nav = 0
+            new_capital = row['capital_raised']
+            
+            # Land appreciation only
+            land_at_cost = row['farms_acquired'] * cost_per_farm
+            land_total = row['land_nav']
+            land_appreciation = land_total - land_at_cost
+            
+            operating = row['net_to_treasury']
+            closing = row['total_nav']
+            
+            recon = {
+                'year': row['year'],
+                'opening_nav': 0,
+                'new_capital': new_capital,
+                'land_revaluation': land_appreciation,
+                'operating_result': operating,
+                'closing_nav': closing
+            }
+        else:
+            # Years 2-10
+            prev_row = df.iloc[i-1]
+            opening_nav = prev_row['total_nav']
+            new_capital = row['capital_raised']
+            
+            # Land appreciation only
+            land_change = row['land_nav'] - prev_row['land_nav']
+            new_farms_cost = row['farms_acquired'] * cost_per_farm
+            land_appreciation = land_change - new_farms_cost
+            
+            operating = row['net_to_treasury']
+            closing = row['total_nav']
+            
+            recon = {
+                'year': row['year'],
+                'opening_nav': opening_nav,
+                'new_capital': new_capital,
+                'land_revaluation': land_appreciation,
+                'operating_result': operating,
+                'closing_nav': closing
+            }
+        
+        nav_recon.append(recon)
+    
+    return pd.DataFrame(nav_recon)
+
+def create_real_stakeholder_flows(df):
+    """Create REAL stakeholder flows table"""
+    stakeholder_cols = ['year', 'pdf_total', 'expert_total', 'supplier_total',
+                      'admin_total', 'operator_paid_total', 'operator_overflow_total', 'tax_total']
+    available_cols = [col for col in stakeholder_cols if col in df.columns]
+    return df[available_cols].copy() if available_cols else df[['year']].copy()
 
 # Page configuration
 st.set_page_config(
@@ -72,58 +677,92 @@ if 'selected_scenario' not in st.session_state:
     st.session_state.selected_scenario = 'Base'
 
 # Load all data files with error handling
-@st.cache_data
+@st.cache_data(ttl=60)
 def load_data():
-    """Load all CSV files from outputs directory with error handling"""
+    """Load all CSV files from outputs directory or run model with Google Sheets data"""
     data = {}
     
-    # Core outputs
-    files = {
-        'portfolio': 'output_portfolio_summary.csv',
-        'stakeholder': 'output_stakeholder_flows.csv',
-        'farm_ledger': 'output_farm_ledger.csv',
-        'nav_recon': 'output_nav_reconciliation.csv',
-        'token_metrics': 'output_token_metrics.csv',
-        'acquisition': 'output_acquisition_schedule.csv',
-        'scenarios': 'scenario_comparison.csv',
-        'sensitivity': 'sensitivity_analysis.csv',
-        'monte_carlo': 'monte_carlo_results.csv',
-        'monte_stats': 'monte_carlo_stats.csv',
-        'scenario_details': 'scenario_details.csv'
-    }
+    # Load input files from Google Sheets first
+    input_data = {}
+    input_loaded_successfully = True
     
-    for key, filename in files.items():
-        filepath = f'outputs/{filename}'
-        if os.path.exists(filepath):
+    for key, url in GOOGLE_SHEETS_URLS.items():
+        sheet_data = load_from_google_sheets(url, key)
+        if not sheet_data.empty:
+            input_data[key] = sheet_data
+        else:
+            # Fallback to local files if Google Sheets fails
+            local_files = {
+                'portfolio_config': 'inputs/1_portfolio_config.csv',
+                'acquisition_mix': 'inputs/2_acquisition_mix.csv',
+                'cop_revenue': 'inputs/3_cop_revenue_timelines.csv',
+                'cost_structure': 'inputs/4_cost_structure.csv',
+                'market_prices': 'inputs/5_market_prices.csv'
+            }
+            if key in local_files and os.path.exists(local_files[key]):
+                try:
+                    input_data[key] = pd.read_csv(local_files[key])
+                except Exception as e:
+                    st.warning(f"Could not load {local_files[key]}: {str(e)}")
+                    input_loaded_successfully = False
+            else:
+                input_loaded_successfully = False
+    
+    # Add input data to main data dict
+    data.update(input_data)
+    
+    # Try to run model with current inputs
+    model_outputs = {}
+    if input_loaded_successfully and len(input_data) == 5:  # All 5 inputs loaded
+        with st.spinner("Running financial model with current inputs..."):
             try:
-                data[key] = pd.read_csv(filepath)
+                model_outputs = run_model(input_data)
+                if model_outputs:
+                    st.success("✅ Model executed successfully with live data!")
+                    # Use model outputs as primary data source
+                    for key, value in model_outputs.items():
+                        if key not in ['acquisition_mix']:  # Don't override input data
+                            data[key] = value
+                else:
+                    st.warning("⚠️ Model execution failed, using static files")
             except Exception as e:
-                st.warning(f"Could not load {filename}: {str(e)}")
+                st.error(f"Model execution error: {str(e)}")
+    else:
+        st.warning("⚠️ Not all inputs available, using static output files")
     
-    # Load input files
-    input_files = {
-        'portfolio_config': 'inputs/1_portfolio_config.csv',
-        'acquisition_mix': 'inputs/2_acquisition_mix.csv',
-        'cop_revenue': 'inputs/3_cop_revenue_timelines.csv',
-        'cost_structure': 'inputs/4_cost_structure.csv',
-        'market_prices': 'inputs/5_market_prices.csv'
-    }
-    
-    for key, filename in input_files.items():
-        if os.path.exists(filename):
+    # Fallback: Load static output files if model didn't run or failed
+    if not model_outputs:
+        files = {
+            'portfolio': 'output_portfolio_summary.csv',
+            'stakeholder': 'output_stakeholder_flows.csv',
+            'farm_ledger': 'output_farm_ledger.csv',
+            'nav_recon': 'output_nav_reconciliation.csv',
+            'token_metrics': 'output_token_metrics.csv',
+            'acquisition': 'output_acquisition_schedule.csv',
+            'scenarios': 'scenario_comparison.csv',
+            'sensitivity': 'sensitivity_analysis.csv',
+            'monte_carlo': 'monte_carlo_results.csv',
+            'monte_stats': 'monte_carlo_stats.csv',
+            'scenario_details': 'scenario_details.csv'
+        }
+        
+        for key, filename in files.items():
+            if key not in data:  # Only load if not already set by model
+                filepath = f'outputs/{filename}'
+                if os.path.exists(filepath):
+                    try:
+                        data[key] = pd.read_csv(filepath)
+                    except Exception as e:
+                        st.warning(f"Could not load {filename}: {str(e)}")
+        
+        # Load executive KPIs
+        kpi_file = 'outputs/output_executive_kpi.txt'
+        if os.path.exists(kpi_file):
             try:
-                data[key] = pd.read_csv(filename)
+                with open(kpi_file, 'r') as f:
+                    data['executive_kpis'] = f.read()
             except Exception as e:
-                st.warning(f"Could not load {filename}: {str(e)}")
-    
-    # Load executive KPIs
-    kpi_file = 'outputs/output_executive_kpi.txt'
-    if os.path.exists(kpi_file):
-        try:
-            with open(kpi_file, 'r') as f:
-                data['executive_kpis'] = f.read()
-        except Exception as e:
-            st.warning(f"Could not load executive KPIs: {str(e)}")
+                st.warning(f"Could not load executive KPIs: {str(e)}")
     
     return data
 
@@ -184,6 +823,12 @@ with st.sidebar:
         help="Select year for detailed analysis"
     )
     st.session_state.selected_year = year_select
+    
+    # Add cache control
+    st.markdown("---")
+    if st.button("🔄 Refresh Data", help="Clear cache and reload data from Google Sheets"):
+        st.cache_data.clear()
+        st.rerun()
     
     # Quick stats
     if 'portfolio' in data:
