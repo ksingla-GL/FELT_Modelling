@@ -804,15 +804,28 @@ def safe_get(df, column, default=0):
         return df[column]
     return default
 
+def show_disclaimer():
+    """Display legal disclaimer on all pages"""
+    st.markdown("---")
+    with st.expander("📋 Important Disclaimer - Please Read"):
+        st.markdown("""
+        **IMPORTANT DISCLAIMER**
+        
+        The financial information, projections, and assumptions set out in this document are provided for illustrative purposes only and do not represent forecasts, guarantees, or promises of future performance. Actual results may vary materially as they are subject to a wide range of known and unknown risks, uncertainties, and factors outside the control of Fresh Earth Universe Pty Ltd (the "Company"), including but not limited to changes in market conditions, regulatory developments, operational execution, and broader economic factors.
+        
+        Nothing in this document constitutes financial product advice, investment advice, or a recommendation to invest in the Company or any associated tokens. Any potential investor should conduct their own independent investigation and seek appropriate professional advice before making any investment decision. The Company undertakes no obligation to update the information contained herein.
+        """, unsafe_allow_html=True)
+    st.markdown("")
+
 # SIDEBAR
 with st.sidebar:
     # Logo in sidebar
     try:
-        st.image("assets/logo.png", width=180)
+        st.image("assets/logo.png", width=120)
     except:
         # Fallback if logo not found
         try:
-            st.image("2025_Ag Logo_Picture1.png", width=180)
+            st.image("2025_Ag Logo_Picture1.png", width=120)
         except:
             pass  # No logo available
     
@@ -861,13 +874,13 @@ with st.sidebar:
 # MAIN CONTENT
 if page == "📊 Executive Dashboard":
     # Header with Logo
-    col1, col2, col3 = st.columns([1, 2, 1])
+    col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         try:
-            st.image("assets/logo.png", width=300)
+            st.image("assets/logo.png", width=200)
         except:
             # Fallback if logo not found
-            st.image("2025_Ag Logo_Picture1.png", width=300)
+            st.image("2025_Ag Logo_Picture1.png", width=200)
     
     st.markdown('<h1 class="main-header">FELT Token Financial Model</h1>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Fresh Earth Land Token - Regenerative Agriculture Investment Platform</p>', unsafe_allow_html=True)
@@ -1123,6 +1136,9 @@ if page == "📊 Executive Dashboard":
                 height=400
             )
             st.plotly_chart(fig, use_container_width=True)
+
+    # Add disclaimer
+    show_disclaimer()
 
 elif page == "🏞️ Farm Portfolio":
     st.markdown("# 🏞️ Farm Portfolio Analysis")
@@ -1400,6 +1416,9 @@ elif page == "🏞️ Farm Portfolio":
                 height=400
             )
             st.plotly_chart(fig, use_container_width=True)
+
+    # Add disclaimer
+    show_disclaimer()
 
 elif page == "💰 Financial Analysis":
     st.markdown("# 💰 Financial Analysis")
@@ -1971,6 +1990,9 @@ elif page == "💰 Financial Analysis":
             )
             st.plotly_chart(fig, use_container_width=True)
 
+    # Add disclaimer
+    show_disclaimer()
+
 elif page == "📈 Token Metrics":
     st.markdown("# 📈 Token Metrics & Valuation")
     
@@ -2320,6 +2342,9 @@ elif page == "📈 Token Metrics":
                     period_stats = period_stats.round(1)
                     period_stats.columns = ['Avg Return %', 'Min Return %', 'Max Return %']
                     st.dataframe(period_stats)
+    
+    # Add disclaimer
+    show_disclaimer()
                     
 elif page == "🔄 Scenario Analysis":
     st.markdown("# 🔄 Scenario & Sensitivity Analysis")
@@ -2624,6 +2649,9 @@ elif page == "🔄 Scenario Analysis":
                     st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Scenario analysis data not available. Run scenario_engine.py to generate scenarios.")
+    
+    # Add disclaimer
+    show_disclaimer()
 
 elif page == "⚙️ Model Inputs":
     st.markdown("# ⚙️ Model Input Assumptions")
@@ -2917,6 +2945,9 @@ elif page == "⚙️ Model Inputs":
             st.dataframe(unit_desc, hide_index=True, use_container_width=True)
         else:
             st.warning("Market price data not available")
+    
+    # Add disclaimer
+    show_disclaimer()
 
 elif page == "📋 Detailed Reports":
     st.markdown("# 📋 Detailed Reports & Data Export")
@@ -3220,6 +3251,9 @@ elif page == "📋 Detailed Reports":
                         height=400
                     )
                     st.plotly_chart(fig, use_container_width=True)
+    
+    # Add disclaimer
+    show_disclaimer()
 
 # Footer
 st.markdown("---")
