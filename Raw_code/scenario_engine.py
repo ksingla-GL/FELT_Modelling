@@ -32,12 +32,16 @@ class ScenarioEngine:
                             price = value * (1 + model.price_growth[parts[1]]) ** (year - 1)
                             model.prices[(parts[1], year)] = price
                 elif parts[0] == 'costs':
-                    if parts[1] in model.costs:
-                        old_val = model.costs[parts[1]]
-                        model.costs[parts[1]] = value
-                        # Rebalance treasury if needed
-                        if parts[1] != 'treasury_pretax':
-                            model.costs['treasury_pretax'] += (old_val - value)
+                    # Update stream-based costs
+                    if len(parts) == 2:  # costs.stakeholder - apply to all streams
+                        stakeholder = parts[1]
+                        for stream in model.stream_costs:
+                            if stakeholder in model.stream_costs[stream] and stakeholder != 'treasury_pretax':
+                                model.stream_costs[stream][stakeholder] = value
+                        # Recalculate treasury rates as balancing figures
+                        for stream in model.stream_costs:
+                            total_other = sum(v for k, v in model.stream_costs[stream].items() if k != 'treasury_pretax')
+                            model.stream_costs[stream]['treasury_pretax'] = 1.0 - total_other
             elif param == 'revenue_scale':
                 # Scale all revenue volumes
                 for key in model.revenue_lookup:
@@ -67,7 +71,6 @@ class ScenarioEngine:
                 'prices.soil': 35,           # Lower ACCU price
                 'prices.biodiversity': 9000, # Lower biodiversity
                 'prices.beef': 3500,         # Lower beef price
-                'prices.water': 4000,        # Lower water price
                 'revenue_scale': 0.8,        # 80% of base volumes
                 'land_appreciation_rate': 0.03,  # 3% appreciation
                 'green_prints_max_premium': 0.10 # 10% max premium
@@ -78,7 +81,6 @@ class ScenarioEngine:
                 'prices.soil': 55,           # Higher ACCU price
                 'prices.biodiversity': 15000, # Higher biodiversity
                 'prices.beef': 4500,         # Premium beef price
-                'prices.water': 6000,        # Higher water price
                 'revenue_scale': 1.2,        # 120% of base volumes
                 'land_appreciation_rate': 0.05,  # 5% appreciation
                 'green_prints_max_premium': 0.20 # 20% max premium
@@ -143,11 +145,6 @@ class ScenarioEngine:
                 'param': 'costs.project_development',
                 'values': [0.10, 0.125, 0.15, 0.175, 0.20],
                 'rebalance': True
-            },
-            'Treasury Rate': {
-                'param': 'costs.treasury_pretax',
-                'values': [0.25, 0.28, 0.32, 0.36, 0.40],
-                'rebalance': False  # Don't rebalance, let total go over 100%
             },
             'Land Appreciation': {
                 'param': 'land_appreciation_rate',
@@ -231,7 +228,6 @@ class ScenarioEngine:
                 'prices.soil': np.random.uniform(35, 55),
                 'prices.biodiversity': np.random.uniform(9000, 15000),
                 'prices.beef': np.random.uniform(3500, 4500),
-                'prices.water': np.random.uniform(4000, 6000),
                 'revenue_scale': np.random.uniform(0.8, 1.2),
                 'land_appreciation_rate': np.random.uniform(0.03, 0.05),
                 'corporate_tax_rate': np.random.uniform(0.25, 0.35)
