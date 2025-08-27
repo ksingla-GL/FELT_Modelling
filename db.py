@@ -511,6 +511,7 @@ def run_model(input_data):
             year_data['new_tokens'] = acquisition['new_tokens']
             year_data['funding_source'] = acquisition['funding_source']
             year_data['feag_issuance_fee'] = acquisition['feag_issuance_fee']
+            year_data['cumulative_feag_fees'] = model.cumulative_feag_issuance_fees
             
             # Process all farms for the year - REAL revenue calculation
             farm_results = []
@@ -1169,6 +1170,40 @@ if page == "📊 Executive Dashboard":
                 self_funding_year,
                 "Treasury funded",
                 delta_color="inverse"
+            )
+    
+    # FEAG Revenue Metrics
+    if 'portfolio' in data:
+        st.markdown("## 💰 FEAG Revenue Metrics")
+        feag_col1, feag_col2, feag_col3 = st.columns(3)
+        
+        # Calculate FEAG revenues
+        total_token_fees = data['portfolio']['cumulative_feag_fees'].iloc[-1] if 'cumulative_feag_fees' in data['portfolio'].columns else 0
+        total_pdf_fees = data['portfolio']['pdf_total'].sum() if 'pdf_total' in data['portfolio'].columns else 0
+        total_feag_revenue = total_token_fees + total_pdf_fees
+        
+        with feag_col1:
+            st.metric(
+                "FEAG Token Issuance Fees",
+                format_currency(total_token_fees/1e6, 1) + "M",
+                "Cumulative 10-year",
+                help="Revenue from token issuance fees"
+            )
+        
+        with feag_col2:
+            st.metric(
+                "FEAG PDF Revenue", 
+                format_currency(total_pdf_fees/1e6, 1) + "M",
+                "Project Development",
+                help="Revenue from farm project development fees"
+            )
+        
+        with feag_col3:
+            st.metric(
+                "Total FEAG Revenue",
+                format_currency(total_feag_revenue/1e6, 1) + "M", 
+                f"{(total_feag_revenue/1e9):.2f}B total",
+                help="Combined token fees and PDF revenue"
             )
     
     # Main charts
@@ -2028,6 +2063,12 @@ elif page == "💰 Financial Analysis":
             if 'portfolio' in data and 'net_to_treasury' in data['portfolio'].columns:
                 summary_items['Treasury'] = data['portfolio']['net_to_treasury'].sum()
             
+            # Add FEAG token fee revenue
+            if 'portfolio' in data and 'cumulative_feag_fees' in data['portfolio'].columns:
+                total_feag_token_fees = data['portfolio']['cumulative_feag_fees'].iloc[-1] if len(data['portfolio']) > 0 else 0
+                if total_feag_token_fees > 0:
+                    summary_items['FEAG (Token Fees)'] = total_feag_token_fees
+            
             if summary_items:
                 total = sum(summary_items.values())
                 summary_data = {
@@ -2613,11 +2654,42 @@ elif page == "📈 Token Metrics":
                     
                     st.dataframe(issuance_summary, hide_index=True, use_container_width=True)
                     
-                    # Show total FEAG issuance fees
+                    # FEAG Token Fee Revenue Analysis
+                    st.markdown("#### FEAG Token Fee Revenue")
+                    
                     if 'feag_issuance_fee' in issuance.columns:
                         total_fees = issuance['feag_issuance_fee'].sum()
-                        if total_fees > 0:
-                            st.metric("Total FEAG Issuance Fees", format_currency(total_fees))
+                        annual_breakdown = issuance[issuance['feag_issuance_fee'] > 0][['year', 'feag_issuance_fee']].copy()
+                        
+                        if len(annual_breakdown) > 0:
+                            fee_col1, fee_col2 = st.columns(2)
+                            
+                            with fee_col1:
+                                st.metric(
+                                    "Total FEAG Token Fees",
+                                    format_currency(total_fees/1e6, 1) + "M",
+                                    "10-year cumulative"
+                                )
+                            
+                            with fee_col2:
+                                avg_fee = total_fees / len(annual_breakdown) if len(annual_breakdown) > 0 else 0
+                                st.metric(
+                                    "Average Annual Fee",
+                                    format_currency(avg_fee/1e6, 1) + "M",
+                                    f"Over {len(annual_breakdown)} years"
+                                )
+                            
+                            # Annual fee breakdown table
+                            if len(annual_breakdown) > 0:
+                                annual_breakdown['feag_issuance_fee'] = annual_breakdown['feag_issuance_fee'].apply(
+                                    lambda x: format_currency(x/1e6, 2) + "M"
+                                )
+                                annual_breakdown.columns = ['Year', 'FEAG Fee Revenue']
+                                st.dataframe(annual_breakdown, hide_index=True, use_container_width=True)
+                        else:
+                            st.info("No token fee revenue generated (all treasury funded)")
+                    else:
+                        st.info("Token fee revenue data not available")
         
         with tab4:
             # Returns Analysis
