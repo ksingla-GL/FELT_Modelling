@@ -1,0 +1,34 @@
+FELT TOKEN MODEL - EXECUTIVE SUMMARY
+Generated: 2025-08-25 19:17:14
+============================================================
+
+KEY METRICS
+-----------
+Initial Token Price: $1.00
+Year 10 Token Price: $2.54
+Token Multiple: 2.5x
+
+Total Farms Acquired: 100
+Portfolio NAV: $2,016,215,345
+  - Land NAV: $1,929,361,426
+  - Treasury NAV: $86,853,919
+
+Annual Revenue (Y10): $1,382,164,816
+
+SELF-FUNDING
+------------
+Self-funding: Not achieved in 10 years
+
+FILES GENERATED
+---------------
+Portfolio Summary: output_portfolio_summary.csv
+Stakeholder Flows: output_stakeholder_flows.csv
+Farm Ledger: output_farm_ledger.csv
+Token Metrics: output_token_metrics.csv
+NAV Reconciliation: output_nav_reconciliation.csv
+Scenario Analysis: scenario_comparison.csv
+Sensitivity Analysis: sensitivity_analysis.csv
+Validation Report: validation_report.txt
+
+============================================================
+Model run completed successfully

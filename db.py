@@ -26,7 +26,7 @@ except ImportError:
     FELTModel = None
     CoP = None
     ScenarioEngine = None
-    STREAMS = ['forestry', 'soil', 'biodiversity', 'beef', 'water']
+    STREAMS = ['forestry', 'soil', 'biodiversity', 'beef']
 
 # Google Sheets URLs - Your actual sheet URLs
 GOOGLE_SHEETS_URLS = {
@@ -59,7 +59,7 @@ class CoP:
         self.cum_profit = 0.0
         self.ledger = []
         
-    def compute_year(self, year, prices, costs, caps, tax_rate, revenue_lookup, green_prints_params):
+    def compute_year(self, year, prices, stream_costs, caps, tax_rate, revenue_lookup, green_prints_params):
         """Compute farm P&L for given year - REAL implementation"""
         age = year - self.a_year + 1
         if age < 1 or age > 10:
@@ -77,15 +77,32 @@ class CoP:
             streams[stream] = rev
             gross += rev
             
-        # Stakeholder splits
-        pays = {k: costs[k] * gross for k in costs.keys()}
+        # Stream-level cost calculations (matching core_model.py logic)
+        total_pays = {'project_development': 0, 'expert': 0, 'supplier': 0, 'admin': 0, 'operator': 0}
+        total_treasury_pretax = 0.0
+        stream_profits = {}
         
-        # Operator cap
-        op_paid = min(pays.get('operator', 0), caps['operator_salary_cap'])
-        op_over = max(pays.get('operator', 0) - op_paid, 0.0)
+        for stream in STREAMS:
+            stream_rev = streams.get(stream, 0)
+            if stream_rev > 0:
+                stream_cost_rates = stream_costs[stream]
+                stream_pays = {k: stream_cost_rates[k] * stream_rev for k in stream_cost_rates.keys()}
+                
+                # Accumulate totals for each stakeholder
+                for stakeholder in ['project_development', 'expert', 'supplier', 'admin', 'operator']:
+                    total_pays[stakeholder] += stream_pays.get(stakeholder, 0)
+                
+                # Stream treasury (before operator cap adjustment)
+                stream_treasury = stream_pays.get('treasury_pretax', 0)
+                total_treasury_pretax += stream_treasury
+                stream_profits[stream] = stream_treasury
         
-        # Pre-tax treasury
-        t_pre = pays.get('treasury_pretax', 0) + op_over
+        # Operator cap adjustment
+        op_paid = min(total_pays['operator'], caps['operator_salary_cap'])
+        op_over = max(total_pays['operator'] - op_paid, 0.0)
+        
+        # Adjusted treasury (add operator overflow)
+        t_pre = total_treasury_pretax + op_over
         
         # Tax & net-to-treasury
         tax = tax_rate * t_pre
@@ -118,18 +135,21 @@ class CoP:
             'gross_soil': streams.get('soil', 0),
             'gross_biodiversity': streams.get('biodiversity', 0),
             'gross_beef': streams.get('beef', 0),
-            'gross_water': streams.get('water', 0),
-            'pdf_fee': pays.get('project_development', 0),
-            'expert_fee': pays.get('expert', 0),
-            'supplier_costs': pays.get('supplier', 0),
-            'admin': pays.get('admin', 0),
+            'pdf_fee': total_pays.get('project_development', 0),
+            'expert_fee': total_pays.get('expert', 0),
+            'supplier_costs': total_pays.get('supplier', 0),
+            'admin': total_pays.get('admin', 0),
             'operator_paid': op_paid,
             'operator_overflow': op_over,
             'treasury_pretax': t_pre,
             'tax': tax,
             'net_to_treasury': ntt,
             'cum_profit': self.cum_profit,
-            'land_fmv': self.land_fmv
+            'land_fmv': self.land_fmv,
+            'forestry_profit': stream_profits.get('forestry', 0),
+            'soil_profit': stream_profits.get('soil', 0),
+            'biodiversity_profit': stream_profits.get('biodiversity', 0),
+            'beef_profit': stream_profits.get('beef', 0)
         }
         
         self.ledger.append(row)
@@ -155,6 +175,7 @@ class CustomFELTModel:
         self.treasury = 0.0
         self.tokens_outstanding = 0.0
         self.farm_counter = 0
+        self.cumulative_feag_issuance_fees = 0.0
         
     def load_inputs(self):
         """Load inputs from provided DataFrames"""
@@ -172,7 +193,7 @@ class CustomFELTModel:
                             'issuance_premium', 'green_prints_start_age', 'green_prints_max_premium',
                             'green_prints_ramp_years', 'discount_rate', 'growth_rate_yr1_2',
                             'growth_rate_yr3_5', 'growth_rate_yr6_8', 'growth_rate_yr9_10',
-                            'terminal_growth', 'dcf_horizon']:
+                            'terminal_growth', 'dcf_horizon', 'token_issuance_fee_pct']:
                     self.portfolio[param] = float(value)
                 else:
                     self.portfolio[param] = value
@@ -198,12 +219,42 @@ class CustomFELTModel:
             st.error("Revenue timeline data missing")
             return
         
-        # Cost structure
+        # Cost structure - handle both old and new formats
         if 'cost_structure' in self.input_data and not self.input_data['cost_structure'].empty:
             cost_df = self.input_data['cost_structure']
-            self.costs = {}
-            for _, row in cost_df.iterrows():
-                self.costs[row['stakeholder']] = float(row['percentage'])
+            
+            # Check if this is the new stream-based format
+            if 'stream' in cost_df.columns:
+                # New stream-based format
+                self.stream_costs = {}
+                for _, row in cost_df.iterrows():
+                    stream = row['stream']
+                    stakeholder = row['stakeholder']
+                    if stream not in self.stream_costs:
+                        self.stream_costs[stream] = {}
+                    self.stream_costs[stream][stakeholder] = float(row['percentage'])
+                
+                # Calculate treasury rates as balancing figures for each stream
+                for stream in self.stream_costs:
+                    total_other_costs = sum(self.stream_costs[stream].values())
+                    self.stream_costs[stream]['treasury_pretax'] = 1.0 - total_other_costs
+            else:
+                # Old format - convert to stream-based format
+                st.warning("⚠️ Using legacy cost structure format. Consider updating to stream-based format.")
+                old_costs = {}
+                for _, row in cost_df.iterrows():
+                    old_costs[row['stakeholder']] = float(row['percentage'])
+                
+                # Apply old costs to all streams equally
+                streams = ['forestry', 'soil', 'biodiversity', 'beef']
+                self.stream_costs = {}
+                for stream in streams:
+                    self.stream_costs[stream] = old_costs.copy()
+                    # Ensure treasury is calculated as balancing figure
+                    if 'treasury_pretax' in self.stream_costs[stream]:
+                        del self.stream_costs[stream]['treasury_pretax']
+                    total_other_costs = sum(self.stream_costs[stream].values())
+                    self.stream_costs[stream]['treasury_pretax'] = 1.0 - total_other_costs
         else:
             st.error("Cost structure data missing")
             return
@@ -330,14 +381,22 @@ class CustomFELTModel:
         funding_source = 'none'
         
         # REAL capital and treasury handling
+        feag_issuance_fee = 0.0
+        
         if year == 1:
-            # Year 1: Initial raise
-            capital_raised = self.portfolio['initial_raise']
+            # Year 1: Initial raise with FEAG fee
+            gross_capital_raised = self.portfolio['initial_raise']
+            fee_rate = self.portfolio.get('token_issuance_fee_pct', 0.0)
+            feag_issuance_fee = gross_capital_raised * fee_rate
+            net_capital = gross_capital_raised - feag_issuance_fee
+            
+            capital_raised = gross_capital_raised
             new_tokens = self.portfolio['initial_token_supply']
             self.tokens_outstanding = new_tokens
+            self.cumulative_feag_issuance_fees += feag_issuance_fee
             
-            # Add capital to treasury
-            self.treasury += capital_raised
+            # Add net capital to treasury (gross - FEAG fee)
+            self.treasury += net_capital
             
             # PAY FOR FARMS FROM TREASURY
             self.treasury -= batch_cost
@@ -354,20 +413,27 @@ class CustomFELTModel:
                 funding_source = 'treasury'
                 
             else:
-                # Need to raise capital
+                # Need to raise capital with FEAG fee
                 funding_gap = batch_cost - available
+                fee_rate = self.portfolio.get('token_issuance_fee_pct', 0.0)
+                
+                # Calculate gross capital needed: funding_gap / (1 - fee_rate)
+                gross_capital_needed = funding_gap / (1 - fee_rate) if fee_rate < 1.0 else funding_gap
+                feag_issuance_fee = gross_capital_needed * fee_rate
                 
                 # Calculate token price at current NAV
                 current_nav = self.calculate_nav()
                 token_price = (current_nav / self.tokens_outstanding) if self.tokens_outstanding > 0 else 1.0
                 issue_price = token_price * (1 + self.portfolio.get('issuance_premium', 0.0))
                 
-                capital_raised = funding_gap
+                capital_raised = gross_capital_needed
                 new_tokens = capital_raised / issue_price
                 self.tokens_outstanding += new_tokens
+                self.cumulative_feag_issuance_fees += feag_issuance_fee
                 
-                # Add new capital to treasury, then pay for farms
-                self.treasury += capital_raised
+                # Add net capital to treasury (gross - FEAG fee), then pay for farms
+                net_capital = gross_capital_needed - feag_issuance_fee
+                self.treasury += net_capital
                 self.treasury -= batch_cost
                 
                 funding_source = 'mixed' if available > 0 else 'equity'
@@ -417,7 +483,8 @@ class CustomFELTModel:
             'capital_raised': capital_raised,
             'new_tokens': new_tokens,
             'funding_source': funding_source,
-            'farms_count': len(farms_acquired)
+            'farms_count': len(farms_acquired),
+            'feag_issuance_fee': feag_issuance_fee
         }
 
 def run_model(input_data):
@@ -443,6 +510,7 @@ def run_model(input_data):
             year_data['capital_raised'] = acquisition['capital_raised']
             year_data['new_tokens'] = acquisition['new_tokens']
             year_data['funding_source'] = acquisition['funding_source']
+            year_data['feag_issuance_fee'] = acquisition['feag_issuance_fee']
             
             # Process all farms for the year - REAL revenue calculation
             farm_results = []
@@ -450,7 +518,7 @@ def run_model(input_data):
                 result = farm.compute_year(
                     year, 
                     model.prices, 
-                    model.costs, 
+                    model.stream_costs, 
                     model.caps,
                     model.portfolio['corporate_tax_rate'],
                     model.revenue_lookup,
@@ -729,7 +797,6 @@ def run_fast_monte_carlo(scenario_engine, n_simulations=25):
                 'prices.soil': np.random.uniform(35, 55),
                 'prices.biodiversity': np.random.uniform(9000, 15000),
                 'prices.beef': np.random.uniform(3500, 4500),
-                'prices.water': np.random.uniform(4000, 6000),
                 'revenue_scale': np.random.uniform(0.8, 1.2),
                 'land_appreciation_rate': np.random.uniform(0.03, 0.05),
                 'corporate_tax_rate': np.random.uniform(0.25, 0.35)
@@ -834,31 +901,42 @@ def load_data():
     """Load all CSV files from outputs directory or run model with Google Sheets data"""
     data = {}
     
-    # Load input files from Google Sheets first
+    # Load input files - prioritize local files over Google Sheets for now
     input_data = {}
     input_loaded_successfully = True
     
-    for key, url in GOOGLE_SHEETS_URLS.items():
-        sheet_data = load_from_google_sheets(url, key)
-        if not sheet_data.empty:
-            input_data[key] = sheet_data
-        else:
-            # Fallback to local files if Google Sheets fails
-            local_files = {
-                'portfolio_config': 'inputs/1_portfolio_config.csv',
-                'acquisition_mix': 'inputs/2_acquisition_mix.csv',
-                'cop_revenue': 'inputs/3_cop_revenue_timelines.csv',
-                'cost_structure': 'inputs/4_cost_structure.csv',
-                'market_prices': 'inputs/5_market_prices.csv'
-            }
-            if key in local_files and os.path.exists(local_files[key]):
-                try:
-                    input_data[key] = pd.read_csv(local_files[key])
-                except Exception as e:
-                    st.warning(f"Could not load {local_files[key]}: {str(e)}")
-                    input_loaded_successfully = False
-            else:
+    # Try local files first
+    local_files = {
+        'portfolio_config': 'inputs/1_portfolio_config.csv',
+        'acquisition_mix': 'inputs/2_acquisition_mix.csv',
+        'cop_revenue': 'inputs/3_cop_revenue_timelines.csv',
+        'cost_structure': 'inputs/4_cost_structure.csv',
+        'market_prices': 'inputs/5_market_prices.csv'
+    }
+    
+    for key, local_path in local_files.items():
+        # Try Google Sheets first
+        if key in GOOGLE_SHEETS_URLS:
+            try:
+                sheet_data = load_from_google_sheets(GOOGLE_SHEETS_URLS[key], key)
+                if not sheet_data.empty:
+                    input_data[key] = sheet_data
+                    st.info(f"📊 Loaded {key} from Google Sheets (primary source)")
+                    continue
+            except Exception as e:
+                st.warning(f"Could not load {key} from Google Sheets: {str(e)}")
+        
+        # Fallback to local CSV if Google Sheets fails or doesn't exist
+        if os.path.exists(local_path):
+            try:
+                input_data[key] = pd.read_csv(local_path)
+                st.warning(f"⚠️ Loaded {key} from local file (fallback)")
+            except Exception as e:
+                st.error(f"Could not load {local_path}: {str(e)}")
                 input_loaded_successfully = False
+        else:
+            st.error(f"No data source available for {key}")
+            input_loaded_successfully = False
     
     # Add input data to main data dict
     data.update(input_data)
@@ -868,9 +946,14 @@ def load_data():
     if input_loaded_successfully and len(input_data) == 5:  # All 5 inputs loaded
         with st.spinner("Running financial model with current inputs..."):
             try:
+                # Check cost structure format and warn if needed
+                if 'cost_structure' in input_data:
+                    cost_df = input_data['cost_structure']
+                    if 'stream' not in cost_df.columns:
+                        st.info("ℹ️ Using legacy cost structure format - will apply same costs to all revenue streams")
+                
                 model_outputs = run_model(input_data)
                 if model_outputs:
-                    st.success("✅ Model executed successfully with live data!")
                     # Use model outputs as primary data source
                     for key, value in model_outputs.items():
                         if key not in ['acquisition_mix']:  # Don't override input data
@@ -879,6 +962,17 @@ def load_data():
                     st.warning("⚠️ Model execution failed, using static files")
             except Exception as e:
                 st.error(f"Model execution error: {str(e)}")
+                # Add more debug info
+                with st.expander("🐛 Debug Information"):
+                    import traceback
+                    st.code(traceback.format_exc())
+                    
+                    if 'cost_structure' in input_data:
+                        st.write("Cost structure columns:", input_data['cost_structure'].columns.tolist())
+                        st.write("Cost structure sample:")
+                        st.dataframe(input_data['cost_structure'].head())
+                        
+                st.warning("⚠️ Model execution failed, using static files")
     else:
         st.warning("⚠️ Not all inputs available, using static output files")
     
@@ -981,6 +1075,7 @@ with st.sidebar:
          "💰 Financial Analysis",
          "📈 Token Metrics",
          "🔄 Scenario Analysis",
+         "💡 Stream Analysis",
          "⚙️ Model Inputs",
          "📋 Detailed Reports"],
         label_visibility="collapsed"
@@ -1145,13 +1240,16 @@ if page == "📊 Executive Dashboard":
             st.plotly_chart(fig, use_container_width=True)
     
     with tab2:
+        st.markdown("### Revenue Streams Analysis")
+        
         # Revenue breakdown by stream with more distinct colors
         if 'farm_ledger' in data:
-            revenue_cols = ['gross_forestry', 'gross_soil', 'gross_biodiversity', 'gross_beef', 'gross_water']
+            revenue_cols = ['gross_forestry', 'gross_soil', 'gross_biodiversity', 'gross_beef']
             # Check which columns exist
             existing_cols = [col for col in revenue_cols if col in data['farm_ledger'].columns]
             
             if existing_cols:
+                # Main revenue evolution chart
                 revenue_by_year = data['farm_ledger'].groupby('year')[existing_cols].sum()
                 
                 fig = go.Figure()
@@ -1180,6 +1278,86 @@ if page == "📊 Executive Dashboard":
                     height=450
                 )
                 st.plotly_chart(fig, use_container_width=True)
+                
+                # Revenue stream cost breakdown
+                st.markdown("#### Cost Breakdown by Revenue Stream")
+                
+                # Load stream breakdown data if available
+                stream_breakdown = None
+                try:
+                    if os.path.exists('outputs/output_stream_breakdown.csv'):
+                        stream_breakdown = pd.read_csv('outputs/output_stream_breakdown.csv')
+                except:
+                    pass
+                
+                if stream_breakdown is not None and len(stream_breakdown) > 0:
+                    # Total costs by stream
+                    cost_cols = ['expert_cost', 'supplier_cost', 'operator_cost', 'project_dev_cost', 'admin_cost']
+                    if all(col in stream_breakdown.columns for col in cost_cols):
+                        cost_totals = stream_breakdown.groupby('stream')[cost_cols].sum()
+                        cost_totals = cost_totals.rename(columns={
+                            'expert_cost': 'Expert',
+                            'supplier_cost': 'Supplier', 
+                            'operator_cost': 'Operator',
+                            'project_dev_cost': 'Project Dev',
+                            'admin_cost': 'Admin'
+                        })
+                        
+                        # Create stacked bar chart
+                        fig_costs = go.Figure()
+                        cost_colors = ['#2196F3', '#4CAF50', '#FF9800', '#9C27B0', '#F44336']
+                        
+                        for i, (cost_type, color) in enumerate(zip(cost_totals.columns, cost_colors)):
+                            fig_costs.add_trace(go.Bar(
+                                x=cost_totals.index,
+                                y=cost_totals[cost_type] / 1e6,
+                                name=cost_type,
+                                marker_color=color
+                            ))
+                        
+                        fig_costs.update_layout(
+                            title="Total Costs by Revenue Stream ($M)",
+                            xaxis_title="Revenue Stream",
+                            yaxis_title="Total Cost ($M)",
+                            barmode='stack',
+                            height=400
+                        )
+                        st.plotly_chart(fig_costs, use_container_width=True)
+                        
+                        # Stream profitability summary
+                        st.markdown("#### Stream Profitability Summary")
+                        profit_summary = stream_breakdown.groupby('stream').agg({
+                            'gross_revenue': 'sum',
+                            'net_profit_before_tax': 'sum'
+                        }).round(0)
+                        
+                        profit_summary['profit_margin'] = (profit_summary['net_profit_before_tax'] / 
+                                                          profit_summary['gross_revenue'] * 100).round(1)
+                        profit_summary['gross_revenue'] = profit_summary['gross_revenue'].apply(lambda x: f"${x:,.0f}")
+                        profit_summary['net_profit_before_tax'] = profit_summary['net_profit_before_tax'].apply(lambda x: f"${x:,.0f}")
+                        profit_summary['profit_margin'] = profit_summary['profit_margin'].apply(lambda x: f"{x}%")
+                        
+                        profit_summary.columns = ['Total Revenue', 'Total Profit', 'Profit Margin']
+                        profit_summary.index.name = 'Stream'
+                        
+                        st.dataframe(profit_summary, use_container_width=True)
+                
+                # Revenue stream metrics
+                col1, col2, col3, col4 = st.columns(4)
+                latest_year = revenue_by_year.index.max() if len(revenue_by_year) > 0 else 1
+                
+                stream_names = ['forestry', 'soil', 'biodiversity', 'beef']
+                for i, (col, stream) in enumerate(zip([col1, col2, col3, col4], stream_names)):
+                    if f'gross_{stream}' in existing_cols:
+                        latest_rev = revenue_by_year[f'gross_{stream}'].iloc[-1] if len(revenue_by_year) > 0 else 0
+                        total_rev = revenue_by_year[f'gross_{stream}'].sum() if len(revenue_by_year) > 0 else 0
+                        
+                        with col:
+                            st.metric(
+                                f"{stream.title()} Stream",
+                                format_currency(latest_rev),
+                                f"${total_rev/1e6:.1f}M total"
+                            )
             else:
                 st.info("Revenue stream details not available")
     
@@ -1370,7 +1548,7 @@ elif page == "🏞️ Farm Portfolio":
                     )
                     
                     # Revenue streams
-                    revenue_cols = ['gross_forestry', 'gross_soil', 'gross_biodiversity', 'gross_beef', 'gross_water']
+                    revenue_cols = ['gross_forestry', 'gross_soil', 'gross_biodiversity', 'gross_beef']
                     existing_rev_cols = [col for col in revenue_cols if col in farm_data.columns]
                     
                     if existing_rev_cols:
@@ -1595,8 +1773,17 @@ elif page == "💰 Financial Analysis":
             # Combine portfolio and stakeholder data
             pnl_data = pd.merge(data['portfolio'], data['stakeholder'], on='year')
             
+            # Show if we have data
+            stakeholder_sum = data['stakeholder']['expert_total'].sum() if 'expert_total' in data['stakeholder'].columns else 0
+            if stakeholder_sum == 0:
+                st.warning("⚠️ No cost data found. Try selecting a different year or ensure the financial model has been run.")
+            
             # Create P&L table for selected year
             year_data = pnl_data[pnl_data['year'] == st.session_state.selected_year].iloc[0]
+            
+            # Check if user is viewing Year 1 (which should be zero)
+            if st.session_state.selected_year == 1:
+                st.warning("⚠️ Year 1 shows $0 costs because farms haven't started producing yet. Select Year 2+ to see actual P&L data.")
             
             col1, col2 = st.columns(2)
             
@@ -1620,21 +1807,13 @@ elif page == "💰 Financial Analysis":
             with col2:
                 st.markdown("#### Net Income")
                 
-                # Use available columns with fallbacks
-                tax = year_data.get('tax_total', year_data.get('tax', 0))
-                net = year_data.get('net_to_treasury', 0)
+                # Use available columns with safe fallbacks
+                tax = year_data.get('tax_total', 0)
+                net = year_data.get('net_to_treasury', 0) 
                 gross = year_data.get('gross_revenue', 1)
                 
-                # Calculate pretax from net + tax if not directly available
-                pretax = year_data.get('treasury_pretax_total', 
-                                       year_data.get('treasury_pretax', 
-                                                    net + tax if net > 0 else 0))
-
-                # If still 0, try calculating from operator overflow
-                if pretax == 0 and net > 0:
-                    operator_overflow = year_data.get('operator_overflow_total', 0)
-                    # Pre-tax should be net + tax
-                    pretax = net + tax
+                # Calculate pretax from net + tax (simple calculation)
+                pretax = net + tax
                 
                 net_items = {
                     'Pre-tax Treasury': pretax,
@@ -1697,6 +1876,12 @@ elif page == "💰 Financial Analysis":
                 height=400
             )
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("P&L data not available. Missing portfolio or stakeholder data.")
+            if 'portfolio' not in data:
+                st.write("❌ Portfolio data missing")
+            if 'stakeholder' not in data:
+                st.write("❌ Stakeholder data missing")
     
     with tab2:
         # NAV Bridge
@@ -2028,7 +2213,7 @@ elif page == "💰 Financial Analysis":
             fig.add_trace(
                 go.Bar(
                     x=portfolio['year'],
-                    y=portfolio.get('net_to_treasury', 0)/1e6,
+                    y=portfolio['net_to_treasury']/1e6,
                     name='Annual Addition',
                     marker_color='#81C784'
                 ),
@@ -2038,7 +2223,7 @@ elif page == "💰 Financial Analysis":
             fig.add_trace(
                 go.Scatter(
                     x=portfolio['year'],
-                    y=portfolio.get(treasury_col, 0)/1e6,
+                    y=portfolio[treasury_col]/1e6,
                     name='Cumulative',
                     line=dict(color='#2E7D32', width=3),
                     mode='lines+markers'
@@ -2131,6 +2316,12 @@ elif page == "💰 Financial Analysis":
                 barmode='stack'
             )
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("Treasury management data not available. Missing portfolio or acquisition data.")
+            if 'portfolio' not in data:
+                st.write("❌ Portfolio data missing")
+            if 'acquisition' not in data:
+                st.write("❌ Acquisition data missing")
 
     # Add disclaimer
     show_disclaimer()
@@ -2401,16 +2592,32 @@ elif page == "📈 Token Metrics":
                 st.markdown("#### Token Issuance Summary")
                 
                 if 'capital_raised' in issuance.columns:
-                    issuance_summary = issuance[['year', 'funding_source', 'capital_raised', 'new_tokens']].copy()
+                    # Include feag_issuance_fee if available
+                    columns_to_include = ['year', 'funding_source', 'capital_raised', 'new_tokens']
+                    if 'feag_issuance_fee' in issuance.columns:
+                        columns_to_include.append('feag_issuance_fee')
+                    
+                    issuance_summary = issuance[columns_to_include].copy()
                     issuance_summary['price_per_token'] = issuance_summary.apply(
                         lambda row: row['capital_raised'] / row['new_tokens'] if row['new_tokens'] > 0 else 0,
                         axis=1
                     )
+                    
+                    # Format columns
                     issuance_summary['capital_raised'] = issuance_summary['capital_raised'].apply(lambda x: format_currency(x))
                     issuance_summary['new_tokens'] = issuance_summary['new_tokens'].apply(lambda x: format_number(x/1e6, 2) + "M" if x > 0 else "-")
                     issuance_summary['price_per_token'] = issuance_summary['price_per_token'].apply(lambda x: format_currency(x, 2) if x > 0 else "-")
                     
+                    if 'feag_issuance_fee' in issuance_summary.columns:
+                        issuance_summary['feag_issuance_fee'] = issuance_summary['feag_issuance_fee'].apply(lambda x: format_currency(x) if x > 0 else "-")
+                    
                     st.dataframe(issuance_summary, hide_index=True, use_container_width=True)
+                    
+                    # Show total FEAG issuance fees
+                    if 'feag_issuance_fee' in issuance.columns:
+                        total_fees = issuance['feag_issuance_fee'].sum()
+                        if total_fees > 0:
+                            st.metric("Total FEAG Issuance Fees", format_currency(total_fees))
         
         with tab4:
             # Returns Analysis
@@ -2795,6 +3002,318 @@ elif page == "🔄 Scenario Analysis":
     # Add disclaimer
     show_disclaimer()
 
+elif page == "💡 Stream Analysis":
+    st.markdown("# 💡 Revenue Stream Analysis")
+    
+    st.info("🔍 Detailed analysis of farm-level performance broken down by individual revenue streams (forestry, soil, biodiversity, beef)")
+    
+    # Load stream breakdown data
+    stream_data = None
+    try:
+        if os.path.exists('outputs/output_stream_breakdown.csv'):
+            stream_data = pd.read_csv('outputs/output_stream_breakdown.csv')
+        else:
+            st.warning("Stream breakdown data not found. Please run the model to generate stream-level analysis.")
+    except Exception as e:
+        st.error(f"Error loading stream data: {str(e)}")
+    
+    if stream_data is not None and len(stream_data) > 0:
+        # Stream analysis tabs
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Stream Overview", "🏞️ Farm-Level Details", "💰 Cost Allocation", "📈 Profitability Analysis"])
+        
+        with tab1:
+            st.markdown("### Revenue Stream Performance Overview")
+            
+            # Stream totals by year
+            stream_totals = stream_data.groupby(['year', 'stream']).agg({
+                'gross_revenue': 'sum',
+                'operator_cost': 'sum',
+                'net_profit_before_tax': 'sum'
+            }).reset_index()
+            
+            # Create revenue evolution chart
+            fig = go.Figure()
+            colors = {'forestry': '#1B5E20', 'soil': '#2E7D32', 'biodiversity': '#388E3C', 'beef': '#4CAF50'}
+            
+            for stream in stream_totals['stream'].unique():
+                stream_data_filtered = stream_totals[stream_totals['stream'] == stream]
+                fig.add_trace(go.Scatter(
+                    x=stream_data_filtered['year'],
+                    y=stream_data_filtered['gross_revenue'] / 1e6,
+                    mode='lines+markers',
+                    name=stream.title(),
+                    line=dict(color=colors.get(stream, '#4CAF50'), width=3),
+                    marker=dict(size=8)
+                ))
+            
+            fig.update_layout(
+                title="Revenue Stream Evolution Over Time",
+                xaxis_title="Year",
+                yaxis_title="Gross Revenue ($M)",
+                height=400,
+                hovermode='x unified'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Stream summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            for i, stream in enumerate(['forestry', 'soil', 'biodiversity', 'beef']):
+                stream_summary = stream_data[stream_data['stream'] == stream]
+                total_revenue = stream_summary['gross_revenue'].sum()
+                total_profit = stream_summary['net_profit_before_tax'].sum()
+                avg_margin = (total_profit / total_revenue * 100) if total_revenue > 0 else 0
+                
+                with [col1, col2, col3, col4][i]:
+                    st.metric(
+                        f"{stream.title()} Stream",
+                        format_currency(total_revenue),
+                        f"{avg_margin:.1f}% margin"
+                    )
+        
+        with tab2:
+            st.markdown("### Farm-Level Stream Performance")
+            
+            # Farm selector
+            farms = sorted(stream_data['farm_id'].unique())
+            selected_farm = st.selectbox("Select Farm:", farms, key="stream_farm_selector")
+            
+            if selected_farm:
+                farm_data = stream_data[stream_data['farm_id'] == selected_farm]
+                
+                # Farm stream performance over time
+                fig = make_subplots(
+                    rows=2, cols=2,
+                    subplot_titles=('Gross Revenue by Stream', 'Cost Allocation', 'Profit by Stream', 'Operator Cap Impact'),
+                    specs=[[{"secondary_y": False}, {"secondary_y": False}],
+                           [{"secondary_y": False}, {"secondary_y": False}]]
+                )
+                
+                # Revenue by stream
+                for stream in ['forestry', 'soil', 'biodiversity', 'beef']:
+                    stream_farm_data = farm_data[farm_data['stream'] == stream]
+                    if not stream_farm_data.empty:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=stream_farm_data['year'],
+                                y=stream_farm_data['gross_revenue'] / 1000,
+                                name=f"{stream.title()} Revenue",
+                                line=dict(color=colors.get(stream, '#4CAF50'))
+                            ),
+                            row=1, col=1
+                        )
+                
+                # Cost allocation
+                cost_cols = ['expert_cost', 'supplier_cost', 'operator_cost', 'project_dev_cost', 'admin_cost']
+                cost_labels = ['Expert', 'Supplier', 'Operator', 'Project Dev', 'Admin']
+                
+                for i, (col, label) in enumerate(zip(cost_cols, cost_labels)):
+                    if col in farm_data.columns:
+                        total_cost = farm_data.groupby('year')[col].sum()
+                        fig.add_trace(
+                            go.Scatter(
+                                x=total_cost.index,
+                                y=total_cost.values / 1000,
+                                name=f"{label} Cost",
+                                stackgroup='costs'
+                            ),
+                            row=1, col=2
+                        )
+                
+                # Profit by stream
+                for stream in ['forestry', 'soil', 'biodiversity', 'beef']:
+                    stream_farm_data = farm_data[farm_data['stream'] == stream]
+                    if not stream_farm_data.empty:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=stream_farm_data['year'],
+                                y=stream_farm_data['net_profit_before_tax'] / 1000,
+                                name=f"{stream.title()} Profit",
+                                line=dict(color=colors.get(stream, '#4CAF50'))
+                            ),
+                            row=2, col=1
+                        )
+                
+                # Operator cap impact
+                if 'capped_operator_farm' in farm_data.columns and 'total_uncapped_operator_farm' in farm_data.columns:
+                    operator_data = farm_data.groupby('year').first()
+                    fig.add_trace(
+                        go.Scatter(
+                            x=operator_data.index,
+                            y=operator_data['total_uncapped_operator_farm'] / 1000,
+                            name="Uncapped Operator Cost",
+                            line=dict(color='red', dash='dash')
+                        ),
+                        row=2, col=2
+                    )
+                    fig.add_trace(
+                        go.Scatter(
+                            x=operator_data.index,
+                            y=operator_data['capped_operator_farm'] / 1000,
+                            name="Capped Operator Cost",
+                            line=dict(color='blue')
+                        ),
+                        row=2, col=2
+                    )
+                
+                fig.update_layout(height=800, showlegend=False)
+                fig.update_xaxes(title_text="Year")
+                fig.update_yaxes(title_text="Amount ($000s)")
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Farm summary table
+                st.markdown(f"#### {selected_farm} Summary")
+                farm_summary = farm_data.groupby(['year', 'stream']).agg({
+                    'gross_revenue': 'sum',
+                    'operator_cost': 'sum',
+                    'net_profit_before_tax': 'sum'
+                }).reset_index()
+                
+                # Pivot for better display
+                for metric in ['gross_revenue', 'operator_cost', 'net_profit_before_tax']:
+                    pivot = farm_summary.pivot(index='year', columns='stream', values=metric)
+                    pivot = pivot.applymap(lambda x: f"${x:,.0f}" if pd.notna(x) else "$0")
+                    st.markdown(f"**{metric.replace('_', ' ').title()}**")
+                    st.dataframe(pivot, use_container_width=True)
+        
+        with tab3:
+            st.markdown("### Cost Allocation Analysis")
+            
+            # Show operator cap effectiveness
+            if 'capped_operator_farm' in stream_data.columns:
+                st.markdown("#### Operator Salary Cap Analysis")
+                
+                cap_analysis = stream_data.groupby(['farm_id', 'year']).agg({
+                    'total_uncapped_operator_farm': 'first',
+                    'capped_operator_farm': 'first',
+                    'operator_overflow_farm': 'first'
+                }).reset_index()
+                
+                # Farms hitting the cap
+                hitting_cap = cap_analysis[cap_analysis['operator_overflow_farm'] > 0]
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Farm-Years", len(cap_analysis))
+                with col2:
+                    st.metric("Farm-Years Hitting Cap", len(hitting_cap))
+                with col3:
+                    cap_rate = len(hitting_cap) / len(cap_analysis) * 100 if len(cap_analysis) > 0 else 0
+                    st.metric("Cap Hit Rate", f"{cap_rate:.1f}%")
+                
+                # Cap impact over time
+                cap_by_year = cap_analysis.groupby('year').agg({
+                    'total_uncapped_operator_farm': 'sum',
+                    'capped_operator_farm': 'sum',
+                    'operator_overflow_farm': 'sum'
+                }).reset_index()
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=cap_by_year['year'],
+                    y=cap_by_year['total_uncapped_operator_farm'] / 1e6,
+                    name="Uncapped Operator Cost",
+                    line=dict(color='red', dash='dash')
+                ))
+                fig.add_trace(go.Scatter(
+                    x=cap_by_year['year'],
+                    y=cap_by_year['capped_operator_farm'] / 1e6,
+                    name="Actual Operator Cost (Capped)",
+                    line=dict(color='blue')
+                ))
+                fig.add_trace(go.Scatter(
+                    x=cap_by_year['year'],
+                    y=cap_by_year['operator_overflow_farm'] / 1e6,
+                    name="Overflow to Treasury",
+                    line=dict(color='green'),
+                    fill='tonexty'
+                ))
+                
+                fig.update_layout(
+                    title="Operator Salary Cap Impact Over Time",
+                    xaxis_title="Year",
+                    yaxis_title="Amount ($M)",
+                    height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+            # Cost breakdown by stream
+            st.markdown("#### Cost Structure by Revenue Stream")
+            cost_breakdown = stream_data.groupby('stream').agg({
+                'expert_cost': 'sum',
+                'supplier_cost': 'sum', 
+                'operator_cost': 'sum',
+                'project_dev_cost': 'sum',
+                'admin_cost': 'sum'
+            }).reset_index()
+            
+            # Melt for stacked bar chart
+            cost_melted = cost_breakdown.melt(id_vars='stream', var_name='cost_type', value_name='amount')
+            cost_melted['cost_type'] = cost_melted['cost_type'].str.replace('_cost', '').str.title()
+            
+            fig = px.bar(
+                cost_melted,
+                x='stream',
+                y='amount',
+                color='cost_type',
+                title="Total Costs by Revenue Stream",
+                labels={'amount': 'Total Cost ($)', 'stream': 'Revenue Stream'}
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with tab4:
+            st.markdown("### Profitability Analysis by Stream")
+            
+            # Stream profitability metrics
+            profitability = stream_data.groupby('stream').agg({
+                'gross_revenue': ['sum', 'mean'],
+                'net_profit_before_tax': ['sum', 'mean'],
+                'operator_cost': 'sum',
+                'expert_cost': 'sum',
+                'supplier_cost': 'sum'
+            }).round(2)
+            
+            # Calculate margins
+            for stream in profitability.index:
+                total_revenue = profitability.loc[stream, ('gross_revenue', 'sum')]
+                total_profit = profitability.loc[stream, ('net_profit_before_tax', 'sum')]
+                margin = (total_profit / total_revenue * 100) if total_revenue > 0 else 0
+                st.write(f"**{stream.title()}**: {margin:.1f}% margin (${total_profit:,.0f} profit on ${total_revenue:,.0f} revenue)")
+            
+            # Profitability trend over time
+            profit_trend = stream_data.groupby(['year', 'stream']).agg({
+                'gross_revenue': 'sum',
+                'net_profit_before_tax': 'sum'
+            }).reset_index()
+            
+            profit_trend['margin'] = profit_trend['net_profit_before_tax'] / profit_trend['gross_revenue'] * 100
+            
+            fig = go.Figure()
+            for stream in profit_trend['stream'].unique():
+                stream_trend = profit_trend[profit_trend['stream'] == stream]
+                fig.add_trace(go.Scatter(
+                    x=stream_trend['year'],
+                    y=stream_trend['margin'],
+                    name=f"{stream.title()} Margin",
+                    line=dict(color=colors.get(stream, '#4CAF50'))
+                ))
+            
+            fig.update_layout(
+                title="Profit Margin Trends by Stream",
+                xaxis_title="Year",
+                yaxis_title="Profit Margin (%)",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    
+    else:
+        st.info("Stream analysis data not available. Please run the financial model to generate detailed stream breakdowns.")
+    
+    # Add disclaimer
+    show_disclaimer()
+
 elif page == "⚙️ Model Inputs":
     st.markdown("# ⚙️ Model Input Assumptions")
     
@@ -2814,7 +3333,7 @@ elif page == "⚙️ Model Inputs":
             categories = {
                 'Investment Parameters': ['land_cost_per_farm', 'dev_cost_per_farm', 'hectares_per_farm'],
                 'Financial Parameters': ['corporate_tax_rate', 'operator_salary_cap', 'working_capital_reserve_pct'],
-                'Token Parameters': ['initial_token_supply', 'initial_raise', 'issuance_premium'],
+                'Token Parameters': ['initial_token_supply', 'initial_raise', 'issuance_premium', 'token_issuance_fee_pct'],
                 'Valuation Parameters': ['land_appreciation_rate', 'green_prints_start_age', 
                                         'green_prints_max_premium', 'green_prints_ramp_years'],
                 'DCF Parameters': ['discount_rate', 'growth_rate_yr1_2', 'growth_rate_yr3_5', 
@@ -2966,53 +3485,98 @@ elif page == "⚙️ Model Inputs":
             st.warning("Revenue timeline data not available")
     
     with tab4:
-        st.markdown("### Cost Structure & Stakeholder Allocation")
+        st.markdown("### Cost Structure & Stakeholder Allocation (Stream-Based)")
         
         if 'cost_structure' in data:
             costs = data['cost_structure']
             
-            # Create pie chart
-            fig = go.Figure(data=[go.Pie(
-                labels=costs['stakeholder'].str.replace('_', ' ').str.title() if 'stakeholder' in costs.columns else [],
-                values=costs['percentage'] if 'percentage' in costs.columns else [],
-                hole=0.4,
-                marker_colors=['#1B5E20', '#2E7D32', '#388E3C', '#4CAF50', '#66BB6A', '#81C784'],
-                textinfo='label+percent',
-                textposition='outside'
-            )])
+            # Show cost structure by stream
+            streams = costs['stream'].unique() if 'stream' in costs.columns else []
             
-            fig.update_layout(
-                title="Revenue Distribution Structure",
-                height=500
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Display table with descriptions
-            if 'stakeholder' in costs.columns and 'percentage' in costs.columns:
-                cost_detail = costs.copy()
-                cost_detail['stakeholder'] = cost_detail['stakeholder'].str.replace('_', ' ').str.title()
-                cost_detail['percentage'] = cost_detail['percentage'].apply(lambda x: f"{x*100:.1f}%")
+            if len(streams) > 0:
+                # Create subplots for each stream
+                cols = st.columns(2)
                 
-                # Add descriptions
-                descriptions = {
-                    'Expert': 'Agricultural consultants and technical advisors',
-                    'Supplier': 'Equipment, inputs, and operational costs',
-                    'Operator': 'Farm management (capped at $250k/farm)',
-                    'Project Development': 'FEAG profit share (PDF)',
-                    'Admin': 'Administrative and overhead costs',
-                    'Treasury Pretax': 'Growth capital before tax (22.4% after tax)'
-                }
+                for i, stream in enumerate(streams):
+                    with cols[i % 2]:
+                        stream_data = costs[costs['stream'] == stream]
+                        
+                        # Calculate treasury rate as balancing figure
+                        other_costs = stream_data[stream_data['stakeholder'] != 'treasury_pretax']['percentage'].sum()
+                        treasury_rate = 1.0 - other_costs
+                        
+                        # Add treasury to data for visualization
+                        viz_data = stream_data.copy()
+                        if treasury_rate > 0:
+                            treasury_row = pd.DataFrame({
+                                'stream': [stream],
+                                'stakeholder': ['treasury_pretax'],
+                                'percentage': [treasury_rate]
+                            })
+                            viz_data = pd.concat([viz_data, treasury_row], ignore_index=True)
+                        
+                        # Create pie chart for this stream
+                        fig = go.Figure(data=[go.Pie(
+                            labels=viz_data['stakeholder'].str.replace('_', ' ').str.title(),
+                            values=viz_data['percentage'],
+                            hole=0.3,
+                            marker_colors=['#1B5E20', '#2E7D32', '#388E3C', '#4CAF50', '#66BB6A', '#81C784'],
+                            textinfo='label+percent',
+                            textposition='outside'
+                        )])
+                        
+                        fig.update_layout(
+                            title=f"{stream.title()} Revenue Stream Allocation",
+                            height=400,
+                            margin=dict(t=50, b=30, l=30, r=30)
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
                 
-                cost_detail['description'] = cost_detail['stakeholder'].map(descriptions)
+                # Summary table showing all streams
+                st.markdown("#### Detailed Cost Structure by Stream")
                 
-                st.dataframe(cost_detail[['stakeholder', 'percentage', 'description']], hide_index=True, use_container_width=True)
+                # Create pivot table
+                if 'stakeholder' in costs.columns and 'percentage' in costs.columns:
+                    pivot_costs = costs.pivot(index='stakeholder', columns='stream', values='percentage')
+                    
+                    # Add treasury rates
+                    for stream in streams:
+                        stream_costs = costs[costs['stream'] == stream]['percentage'].sum()
+                        pivot_costs.loc['treasury_pretax', stream] = 1.0 - stream_costs
+                    
+                    # Format as percentages
+                    pivot_formatted = pivot_costs.applymap(lambda x: f"{x*100:.1f}%" if pd.notna(x) else "0.0%")
+                    pivot_formatted.index = pivot_formatted.index.str.replace('_', ' ').str.title()
+                    pivot_formatted.columns = [col.title() for col in pivot_formatted.columns]
+                    
+                    st.dataframe(pivot_formatted, use_container_width=True)
+                    
+                    # Add descriptions
+                    st.markdown("#### Stakeholder Descriptions")
+                    descriptions = {
+                        'Expert': 'Agricultural consultants and technical advisors',
+                        'Supplier': 'Equipment, inputs, and operational costs', 
+                        'Operator': 'Farm management (capped at $250k/farm total)',
+                        'Project Development': 'FEAG profit share (PDF)',
+                        'Admin': 'Administrative and overhead costs',
+                        'Treasury Pretax': 'Growth capital before tax (balancing figure)'
+                    }
+                    
+                    for stakeholder, description in descriptions.items():
+                        st.write(f"**{stakeholder}**: {description}")
                 
-                # Verify totals
-                total = costs['percentage'].sum()
-                if abs(total - 1.0) < 0.001:
-                    st.success(f"✅ Cost structure totals to {total*100:.1f}%")
-                else:
-                    st.error(f"⚠️ Cost structure totals to {total*100:.1f}% (should be 100%)")
+                # Validation
+                for stream in streams:
+                    stream_total = costs[costs['stream'] == stream]['percentage'].sum()
+                    treasury_rate = 1.0 - stream_total
+                    total_with_treasury = stream_total + treasury_rate
+                    
+                    if abs(total_with_treasury - 1.0) < 0.001:
+                        st.success(f"✅ {stream.title()} stream totals to {total_with_treasury*100:.1f}%")
+                    else:
+                        st.error(f"❌ {stream.title()} stream totals to {total_with_treasury*100:.1f}% (should be 100%)")
+            else:
+                st.warning("No cost structure streams found")
         else:
             st.warning("Cost structure data not available")
     
@@ -3027,7 +3591,7 @@ elif page == "⚙️ Model Inputs":
             
             years = list(range(1, 11))
             colors = {'forestry': '#1B5E20', 'soil': '#2E7D32', 'biodiversity': '#388E3C', 
-                     'beef': '#4CAF50', 'water': '#66BB6A'}
+                     'beef': '#4CAF50'}
             
             for _, row in prices.iterrows():
                 asset = row.get('asset', '')
@@ -3058,14 +3622,14 @@ elif page == "⚙️ Model Inputs":
             price_detail = prices.copy()
             if all(col in price_detail.columns for col in ['asset', 'spot_price', 'annual_growth_rate']):
                 price_detail['spot_price'] = price_detail.apply(
-                    lambda x: format_currency(x['spot_price']) if x['asset'] in ['biodiversity', 'beef', 'water'] else f"${x['spot_price']}", 
+                    lambda x: format_currency(x['spot_price']) if x['asset'] in ['biodiversity', 'beef'] else f"${x['spot_price']}", 
                     axis=1
                 )
                 price_detail['annual_growth_rate'] = price_detail['annual_growth_rate'].apply(lambda x: f"{x*100:.0f}%")
                 
                 # Add year 10 price
                 price_detail['year_10_price'] = prices.apply(
-                    lambda x: format_currency(x['spot_price'] * (1 + x['annual_growth_rate']) ** 9) if x['asset'] in ['biodiversity', 'beef', 'water'] else f"${x['spot_price'] * (1 + x['annual_growth_rate']) ** 9:.0f}",
+                    lambda x: format_currency(x['spot_price'] * (1 + x['annual_growth_rate']) ** 9) if x['asset'] in ['biodiversity', 'beef'] else f"${x['spot_price'] * (1 + x['annual_growth_rate']) ** 9:.0f}",
                     axis=1
                 )
                 
@@ -3081,7 +3645,6 @@ elif page == "⚙️ Model Inputs":
                 {'Asset': 'Soil', 'Unit': 'ACCU (Carbon Credit)', 'Description': 'Carbon credits from soil carbon sequestration'},
                 {'Asset': 'Biodiversity', 'Unit': 'Biodiversity Credit', 'Description': 'Credits for biodiversity conservation and enhancement'},
                 {'Asset': 'Beef', 'Unit': 'Head', 'Description': 'Price per head of cattle'},
-                {'Asset': 'Water', 'Unit': 'Megalitre', 'Description': 'Price per megalitre of water rights'}
             ])
             
             st.dataframe(unit_desc, hide_index=True, use_container_width=True)
@@ -3127,9 +3690,11 @@ elif page == "📋 Detailed Reports":
             - **Financial Performance**: ${year_10.get('gross_revenue', 0)/1e6:.0f}M annual revenue with {(year_10.get('net_to_treasury', 0)/year_10.get('gross_revenue', 1)*100):.1f}% net margin
             - **NAV Growth**: ${year_1.get('total_nav', 0)/1e6:.0f}M → ${year_10.get('total_nav', 0)/1e6:.0f}M ({year_10.get('total_nav', 1)/year_1.get('total_nav', 1):.1f}x growth)
             - **Treasury Management**: ${year_10.get('treasury_nav', year_10.get('closing_treasury', 0))/1e6:.0f}M treasury supporting self-funded growth
+            - **Total FEAG PDF**: ${data['portfolio']['pdf_total'].sum()/1e6 if 'pdf_total' in data['portfolio'].columns else 0:.0f}M
+            - **Total FEAG Issuance Fees**: ${data['portfolio']['feag_issuance_fee'].sum()/1e6 if 'feag_issuance_fee' in data['portfolio'].columns else 0:.0f}M
             
             **Investment Highlights:**
-            ✅ Diversified revenue streams across carbon, biodiversity, beef, and water markets
+            ✅ Diversified revenue streams across carbon, biodiversity, and beef markets
             ✅ Self-funding achieved by Year {data['portfolio'][data['portfolio'].get('self_funding_capable', False) == True]['year'].min() if 'self_funding_capable' in data['portfolio'].columns and any(data['portfolio'].get('self_funding_capable', False)) else 'TBD'}
             ✅ Strong stakeholder alignment with transparent distribution model
             ✅ Green Prints premium driving land value appreciation

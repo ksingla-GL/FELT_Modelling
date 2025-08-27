@@ -3,7 +3,7 @@ land_cost_per_farm,10000000
 dev_cost_per_farm,4000000
 hectares_per_farm,1000
 land_appreciation_rate,0.04
-operator_salary_cap,250000
+operator_salary_cap,400000
 corporate_tax_rate,0.25
 working_capital_reserve_pct,0
 initial_token_supply,140000000
@@ -20,3 +20,4 @@ growth_rate_yr6_8,0.15
 growth_rate_yr9_10,0.1
 terminal_growth,0.03
 dcf_horizon,10
+token_issuance_fee_pct,0.05

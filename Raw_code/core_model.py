@@ -8,7 +8,7 @@ import numpy as np
 import warnings
 warnings.filterwarnings('ignore')
 
-STREAMS = ['forestry', 'soil', 'biodiversity', 'beef', 'water']
+STREAMS = ['forestry', 'soil', 'biodiversity', 'beef']
 
 class CoP:
     """Change of Practice (farm) entity"""
@@ -23,33 +23,48 @@ class CoP:
         self.cum_profit = 0.0
         self.ledger = []
         
-    def compute_year(self, year, prices, costs, caps, tax_rate, revenue_lookup, green_prints_params):
+    def compute_year(self, year, prices, stream_costs, caps, tax_rate, revenue_lookup, green_prints_params):
         """Compute farm P&L for given year"""
         age = year - self.a_year + 1
         if age < 1 or age > 10:
             return None
             
-        # Gross revenue by stream
+        # Gross revenue and stream-level costs
         gross = 0.0
         streams = {}
+        stream_profits = {}
+        total_pays = {'project_development': 0, 'expert': 0, 'supplier': 0, 'admin': 0, 'operator': 0}
+        total_treasury_pretax = 0.0
         
         for stream in STREAMS:
             units_per_ha = revenue_lookup.get((self.type, stream, age), 0)
             units = units_per_ha * self.hectares
             price = prices.get((stream, year), 0)
-            rev = units * price
-            streams[stream] = rev
-            gross += rev
+            stream_rev = units * price
+            streams[stream] = stream_rev
+            gross += stream_rev
             
-        # Stakeholder splits
-        pays = {k: costs[k] * gross for k in costs.keys()}
+            # Stream-level cost allocations
+            stream_cost_rates = stream_costs[stream]
+            stream_pays = {k: stream_cost_rates[k] * stream_rev for k in stream_cost_rates.keys()}
+            
+            # Accumulate totals for each stakeholder
+            for stakeholder in ['project_development', 'expert', 'supplier', 'admin', 'operator']:
+                total_pays[stakeholder] += stream_pays.get(stakeholder, 0)
+            
+            # Stream treasury (before operator cap adjustment)
+            stream_treasury = stream_pays.get('treasury_pretax', 0)
+            total_treasury_pretax += stream_treasury
+            
+            # Store stream profit (before operator cap and tax)
+            stream_profits[stream] = stream_treasury
         
-        # Operator cap
-        op_paid = min(pays.get('operator', 0), caps['operator_salary_cap'])
-        op_over = max(pays.get('operator', 0) - op_paid, 0.0)
+        # Operator cap adjustment
+        op_paid = min(total_pays['operator'], caps['operator_salary_cap'])
+        op_over = max(total_pays['operator'] - op_paid, 0.0)
         
-        # Pre-tax treasury
-        t_pre = pays.get('treasury_pretax', 0) + op_over
+        # Adjusted treasury (add operator overflow)
+        t_pre = total_treasury_pretax + op_over
         
         # Tax & net-to-treasury
         tax = tax_rate * t_pre
@@ -82,18 +97,21 @@ class CoP:
             'gross_soil': streams.get('soil', 0),
             'gross_biodiversity': streams.get('biodiversity', 0),
             'gross_beef': streams.get('beef', 0),
-            'gross_water': streams.get('water', 0),
-            'pdf_fee': pays.get('project_development', 0),
-            'expert_fee': pays.get('expert', 0),
-            'supplier_costs': pays.get('supplier', 0),
-            'admin': pays.get('admin', 0),
+            'pdf_fee': total_pays.get('project_development', 0),
+            'expert_fee': total_pays.get('expert', 0),
+            'supplier_costs': total_pays.get('supplier', 0),
+            'admin': total_pays.get('admin', 0),
             'operator_paid': op_paid,
             'operator_overflow': op_over,
             'treasury_pretax': t_pre,
             'tax': tax,
             'net_to_treasury': ntt,
             'cum_profit': self.cum_profit,
-            'land_fmv': self.land_fmv
+            'land_fmv': self.land_fmv,
+            'forestry_profit': stream_profits.get('forestry', 0),
+            'soil_profit': stream_profits.get('soil', 0),
+            'biodiversity_profit': stream_profits.get('biodiversity', 0),
+            'beef_profit': stream_profits.get('beef', 0)
         }
         
         self.ledger.append(row)
@@ -108,6 +126,7 @@ class FELTModel:
         self.treasury = 0.0  # START AT ZERO - CRITICAL FIX
         self.tokens_outstanding = 0.0
         self.farm_counter = 0
+        self.cumulative_feag_issuance_fees = 0.0
         
     def load_inputs(self):
         """Load all CSV inputs with proper type conversion"""
@@ -122,7 +141,7 @@ class FELTModel:
                         'land_appreciation_rate', 'operator_salary_cap', 'corporate_tax_rate',
                         'working_capital_reserve_pct', 'initial_token_supply', 'initial_raise',
                         'issuance_premium', 'green_prints_start_age', 'green_prints_max_premium',
-                        'green_prints_ramp_years']:
+                        'green_prints_ramp_years', 'token_issuance_fee_pct']:
                 self.portfolio[param] = float(value)
             else:
                 self.portfolio[param] = value
@@ -137,11 +156,20 @@ class FELTModel:
             key = (row['cop_type'], row['stream'], int(row['operational_age']))
             self.revenue_lookup[key] = float(row['units_per_hectare'])
         
-        # Cost structure
+        # Cost structure - stream-based
         cost_df = pd.read_csv('inputs/4_cost_structure.csv')
-        self.costs = {}
+        self.stream_costs = {}
         for _, row in cost_df.iterrows():
-            self.costs[row['stakeholder']] = float(row['percentage'])
+            stream = row['stream']
+            stakeholder = row['stakeholder']
+            if stream not in self.stream_costs:
+                self.stream_costs[stream] = {}
+            self.stream_costs[stream][stakeholder] = float(row['percentage'])
+        
+        # Calculate treasury rates as balancing figures for each stream
+        for stream in self.stream_costs:
+            total_other_costs = sum(self.stream_costs[stream].values())
+            self.stream_costs[stream]['treasury_pretax'] = 1.0 - total_other_costs
         
         # Market prices
         prices_df = pd.read_csv('inputs/5_market_prices.csv')
@@ -192,14 +220,22 @@ class FELTModel:
         funding_source = 'none'
         
         # CRITICAL FIX: Proper capital and treasury handling
+        feag_issuance_fee = 0.0
+        
         if year == 1:
-            # Year 1: Initial raise
-            capital_raised = self.portfolio['initial_raise']
+            # Year 1: Initial raise with FEAG fee
+            gross_capital_raised = self.portfolio['initial_raise']
+            fee_rate = self.portfolio.get('token_issuance_fee_pct', 0.0)
+            feag_issuance_fee = gross_capital_raised * fee_rate
+            net_capital = gross_capital_raised - feag_issuance_fee
+            
+            capital_raised = gross_capital_raised
             new_tokens = self.portfolio['initial_token_supply']
             self.tokens_outstanding = new_tokens
+            self.cumulative_feag_issuance_fees += feag_issuance_fee
             
-            # Add capital to treasury
-            self.treasury += capital_raised
+            # Add net capital to treasury (gross - FEAG fee)
+            self.treasury += net_capital
             
             # PAY FOR FARMS FROM TREASURY - CRITICAL
             self.treasury -= batch_cost
@@ -216,20 +252,27 @@ class FELTModel:
                 funding_source = 'treasury'
                 
             else:
-                # Need to raise capital
+                # Need to raise capital with FEAG fee
                 funding_gap = batch_cost - available
+                fee_rate = self.portfolio.get('token_issuance_fee_pct', 0.0)
+                
+                # Calculate gross capital needed: funding_gap / (1 - fee_rate)
+                gross_capital_needed = funding_gap / (1 - fee_rate) if fee_rate < 1.0 else funding_gap
+                feag_issuance_fee = gross_capital_needed * fee_rate
                 
                 # Calculate token price at current NAV
                 current_nav = self.calculate_nav()
                 token_price = (current_nav / self.tokens_outstanding) if self.tokens_outstanding > 0 else 1.0
                 issue_price = token_price * (1 + self.portfolio.get('issuance_premium', 0.0))
                 
-                capital_raised = funding_gap
+                capital_raised = gross_capital_needed
                 new_tokens = capital_raised / issue_price
                 self.tokens_outstanding += new_tokens
+                self.cumulative_feag_issuance_fees += feag_issuance_fee
                 
-                # Add new capital to treasury, then pay for farms
-                self.treasury += capital_raised
+                # Add net capital to treasury (gross - FEAG fee), then pay for farms
+                net_capital = gross_capital_needed - feag_issuance_fee
+                self.treasury += net_capital
                 self.treasury -= batch_cost
                 
                 funding_source = 'mixed' if available > 0 else 'equity'
@@ -279,7 +322,8 @@ class FELTModel:
             'capital_raised': capital_raised,
             'new_tokens': new_tokens,
             'funding_source': funding_source,
-            'farms_count': len(farms_acquired)
+            'farms_count': len(farms_acquired),
+            'feag_issuance_fee': feag_issuance_fee
         }
         
     def calculate_nav(self):
@@ -374,6 +418,7 @@ class FELTModel:
             year_data['capital_raised'] = acquisition['capital_raised']
             year_data['new_tokens'] = acquisition['new_tokens']
             year_data['funding_source'] = acquisition['funding_source']
+            year_data['feag_issuance_fee'] = acquisition['feag_issuance_fee']
             
             # Process all farms for the year
             farm_results = []
@@ -381,7 +426,7 @@ class FELTModel:
                 result = farm.compute_year(
                     year, 
                     self.prices, 
-                    self.costs, 
+                    self.stream_costs, 
                     self.caps,
                     self.portfolio['corporate_tax_rate'],
                     self.revenue_lookup,
@@ -463,7 +508,7 @@ class FELTModel:
                          'gross_revenue', 'net_to_treasury', 'closing_treasury',
                          'land_nav', 'treasury_nav', 'total_nav', 'token_price',
                          'standard_token_price', 'dcf_premium', 'pv_future_cash',
-                         'self_funding_capable', 'oldest_farm_cum_profit']
+                         'self_funding_capable', 'oldest_farm_cum_profit', 'feag_issuance_fee']
         df[portfolio_cols].to_csv('outputs/output_portfolio_summary.csv', index=False)
         
         # Stakeholder flows
@@ -485,10 +530,74 @@ class FELTModel:
                 farm_ledger.append(row)
         if farm_ledger:
             pd.DataFrame(farm_ledger).to_csv('outputs/output_farm_ledger.csv', index=False)
+            
+        # Stream-level breakdown
+        stream_breakdown = []
+        for farm in self.farms:
+            for entry in farm.ledger:
+                farm_gross_rev = entry.get('gross', 0)
+                if farm_gross_rev > 0:
+                    # Calculate total uncapped operator cost for this farm
+                    total_uncapped_operator = 0
+                    stream_revenues = {}
+                    for stream in STREAMS:
+                        stream_rev = entry.get(f'gross_{stream}', 0)
+                        if stream_rev > 0:
+                            stream_revenues[stream] = stream_rev
+                            stream_costs = self.stream_costs[stream]
+                            total_uncapped_operator += stream_costs['operator'] * stream_rev
+                    
+                    # Apply operator cap at farm level
+                    capped_operator = min(total_uncapped_operator, self.caps['operator_salary_cap'])
+                    operator_overflow = max(total_uncapped_operator - capped_operator, 0.0)
+                    
+                    # Allocate costs across streams
+                    for stream in STREAMS:
+                        stream_rev = stream_revenues.get(stream, 0)
+                        if stream_rev > 0:
+                            stream_costs = self.stream_costs[stream]
+                            
+                            # Proportional allocation of capped operator cost
+                            stream_share = stream_rev / farm_gross_rev
+                            allocated_operator = capped_operator * stream_share
+                            
+                            # Calculate other costs normally
+                            expert_cost = stream_costs['expert'] * stream_rev
+                            supplier_cost = stream_costs['supplier'] * stream_rev
+                            project_dev_cost = stream_costs['project_development'] * stream_rev
+                            admin_cost = stream_costs['admin'] * stream_rev
+                            
+                            # Treasury gets the normal rate plus proportional operator overflow
+                            base_treasury = stream_costs['treasury_pretax'] * stream_rev
+                            overflow_share = operator_overflow * stream_share
+                            total_treasury = base_treasury + overflow_share
+                            
+                            stream_row = {
+                                'farm_id': farm.id,
+                                'farm_type': farm.type,
+                                'year': entry['year'],
+                                'age': entry['age'],
+                                'stream': stream,
+                                'gross_revenue': stream_rev,
+                                'expert_cost': expert_cost,
+                                'supplier_cost': supplier_cost,
+                                'operator_cost': allocated_operator,
+                                'operator_overflow_allocated': overflow_share,
+                                'project_dev_cost': project_dev_cost,
+                                'admin_cost': admin_cost,
+                                'treasury_pretax_rate': stream_costs['treasury_pretax'],
+                                'treasury_pretax_base': base_treasury,
+                                'treasury_pretax_total': total_treasury,
+                                'net_profit_before_tax': entry.get(f'{stream}_profit', 0)
+                            }
+                            stream_breakdown.append(stream_row)
+        
+        if stream_breakdown:
+            pd.DataFrame(stream_breakdown).to_csv('outputs/output_stream_breakdown.csv', index=False)
         
         # Acquisition schedule
         acq_schedule = df[['year', 'farms_acquired', 'capital_raised', 'new_tokens',
-                         'funding_source']].copy()
+                         'funding_source', 'feag_issuance_fee']].copy()
         acq_schedule.to_csv('outputs/output_acquisition_schedule.csv', index=False)
         
         # NAV reconciliation - FIXED to not include capital
@@ -586,6 +695,7 @@ Portfolio NAV: ${year_10['total_nav']:,.0f}
 Land NAV: ${year_10['land_nav']:,.0f}
 Treasury NAV: ${year_10['treasury_nav']:,.0f}
 Total FEAG PDF: ${df['pdf_total'].sum():,.0f}
+Total FEAG Issuance Fees: ${df['feag_issuance_fee'].sum():,.0f}
 Min Mature Farm Profit: ${min_profit:,.0f}
 
 Key Checks:
