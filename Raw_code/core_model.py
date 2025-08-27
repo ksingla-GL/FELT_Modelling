@@ -126,6 +126,7 @@ class FELTModel:
         self.treasury = 0.0  # START AT ZERO - CRITICAL FIX
         self.tokens_outstanding = 0.0
         self.farm_counter = 0
+        self.cumulative_feag_issuance_fees = 0.0
         
     def load_inputs(self):
         """Load all CSV inputs with proper type conversion"""
@@ -140,7 +141,7 @@ class FELTModel:
                         'land_appreciation_rate', 'operator_salary_cap', 'corporate_tax_rate',
                         'working_capital_reserve_pct', 'initial_token_supply', 'initial_raise',
                         'issuance_premium', 'green_prints_start_age', 'green_prints_max_premium',
-                        'green_prints_ramp_years']:
+                        'green_prints_ramp_years', 'token_issuance_fee_pct']:
                 self.portfolio[param] = float(value)
             else:
                 self.portfolio[param] = value
@@ -219,14 +220,22 @@ class FELTModel:
         funding_source = 'none'
         
         # CRITICAL FIX: Proper capital and treasury handling
+        feag_issuance_fee = 0.0
+        
         if year == 1:
-            # Year 1: Initial raise
-            capital_raised = self.portfolio['initial_raise']
+            # Year 1: Initial raise with FEAG fee
+            gross_capital_raised = self.portfolio['initial_raise']
+            fee_rate = self.portfolio.get('token_issuance_fee_pct', 0.0)
+            feag_issuance_fee = gross_capital_raised * fee_rate
+            net_capital = gross_capital_raised - feag_issuance_fee
+            
+            capital_raised = gross_capital_raised
             new_tokens = self.portfolio['initial_token_supply']
             self.tokens_outstanding = new_tokens
+            self.cumulative_feag_issuance_fees += feag_issuance_fee
             
-            # Add capital to treasury
-            self.treasury += capital_raised
+            # Add net capital to treasury (gross - FEAG fee)
+            self.treasury += net_capital
             
             # PAY FOR FARMS FROM TREASURY - CRITICAL
             self.treasury -= batch_cost
@@ -243,20 +252,27 @@ class FELTModel:
                 funding_source = 'treasury'
                 
             else:
-                # Need to raise capital
+                # Need to raise capital with FEAG fee
                 funding_gap = batch_cost - available
+                fee_rate = self.portfolio.get('token_issuance_fee_pct', 0.0)
+                
+                # Calculate gross capital needed: funding_gap / (1 - fee_rate)
+                gross_capital_needed = funding_gap / (1 - fee_rate) if fee_rate < 1.0 else funding_gap
+                feag_issuance_fee = gross_capital_needed * fee_rate
                 
                 # Calculate token price at current NAV
                 current_nav = self.calculate_nav()
                 token_price = (current_nav / self.tokens_outstanding) if self.tokens_outstanding > 0 else 1.0
                 issue_price = token_price * (1 + self.portfolio.get('issuance_premium', 0.0))
                 
-                capital_raised = funding_gap
+                capital_raised = gross_capital_needed
                 new_tokens = capital_raised / issue_price
                 self.tokens_outstanding += new_tokens
+                self.cumulative_feag_issuance_fees += feag_issuance_fee
                 
-                # Add new capital to treasury, then pay for farms
-                self.treasury += capital_raised
+                # Add net capital to treasury (gross - FEAG fee), then pay for farms
+                net_capital = gross_capital_needed - feag_issuance_fee
+                self.treasury += net_capital
                 self.treasury -= batch_cost
                 
                 funding_source = 'mixed' if available > 0 else 'equity'
@@ -306,7 +322,8 @@ class FELTModel:
             'capital_raised': capital_raised,
             'new_tokens': new_tokens,
             'funding_source': funding_source,
-            'farms_count': len(farms_acquired)
+            'farms_count': len(farms_acquired),
+            'feag_issuance_fee': feag_issuance_fee
         }
         
     def calculate_nav(self):
@@ -401,6 +418,7 @@ class FELTModel:
             year_data['capital_raised'] = acquisition['capital_raised']
             year_data['new_tokens'] = acquisition['new_tokens']
             year_data['funding_source'] = acquisition['funding_source']
+            year_data['feag_issuance_fee'] = acquisition['feag_issuance_fee']
             
             # Process all farms for the year
             farm_results = []
@@ -490,7 +508,7 @@ class FELTModel:
                          'gross_revenue', 'net_to_treasury', 'closing_treasury',
                          'land_nav', 'treasury_nav', 'total_nav', 'token_price',
                          'standard_token_price', 'dcf_premium', 'pv_future_cash',
-                         'self_funding_capable', 'oldest_farm_cum_profit']
+                         'self_funding_capable', 'oldest_farm_cum_profit', 'feag_issuance_fee']
         df[portfolio_cols].to_csv('outputs/output_portfolio_summary.csv', index=False)
         
         # Stakeholder flows
@@ -579,7 +597,7 @@ class FELTModel:
         
         # Acquisition schedule
         acq_schedule = df[['year', 'farms_acquired', 'capital_raised', 'new_tokens',
-                         'funding_source']].copy()
+                         'funding_source', 'feag_issuance_fee']].copy()
         acq_schedule.to_csv('outputs/output_acquisition_schedule.csv', index=False)
         
         # NAV reconciliation - FIXED to not include capital
@@ -677,6 +695,7 @@ Portfolio NAV: ${year_10['total_nav']:,.0f}
 Land NAV: ${year_10['land_nav']:,.0f}
 Treasury NAV: ${year_10['treasury_nav']:,.0f}
 Total FEAG PDF: ${df['pdf_total'].sum():,.0f}
+Total FEAG Issuance Fees: ${df['feag_issuance_fee'].sum():,.0f}
 Min Mature Farm Profit: ${min_profit:,.0f}
 
 Key Checks:

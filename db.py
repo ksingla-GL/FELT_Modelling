@@ -175,6 +175,7 @@ class CustomFELTModel:
         self.treasury = 0.0
         self.tokens_outstanding = 0.0
         self.farm_counter = 0
+        self.cumulative_feag_issuance_fees = 0.0
         
     def load_inputs(self):
         """Load inputs from provided DataFrames"""
@@ -192,7 +193,7 @@ class CustomFELTModel:
                             'issuance_premium', 'green_prints_start_age', 'green_prints_max_premium',
                             'green_prints_ramp_years', 'discount_rate', 'growth_rate_yr1_2',
                             'growth_rate_yr3_5', 'growth_rate_yr6_8', 'growth_rate_yr9_10',
-                            'terminal_growth', 'dcf_horizon']:
+                            'terminal_growth', 'dcf_horizon', 'token_issuance_fee_pct']:
                     self.portfolio[param] = float(value)
                 else:
                     self.portfolio[param] = value
@@ -380,14 +381,22 @@ class CustomFELTModel:
         funding_source = 'none'
         
         # REAL capital and treasury handling
+        feag_issuance_fee = 0.0
+        
         if year == 1:
-            # Year 1: Initial raise
-            capital_raised = self.portfolio['initial_raise']
+            # Year 1: Initial raise with FEAG fee
+            gross_capital_raised = self.portfolio['initial_raise']
+            fee_rate = self.portfolio.get('token_issuance_fee_pct', 0.0)
+            feag_issuance_fee = gross_capital_raised * fee_rate
+            net_capital = gross_capital_raised - feag_issuance_fee
+            
+            capital_raised = gross_capital_raised
             new_tokens = self.portfolio['initial_token_supply']
             self.tokens_outstanding = new_tokens
+            self.cumulative_feag_issuance_fees += feag_issuance_fee
             
-            # Add capital to treasury
-            self.treasury += capital_raised
+            # Add net capital to treasury (gross - FEAG fee)
+            self.treasury += net_capital
             
             # PAY FOR FARMS FROM TREASURY
             self.treasury -= batch_cost
@@ -404,20 +413,27 @@ class CustomFELTModel:
                 funding_source = 'treasury'
                 
             else:
-                # Need to raise capital
+                # Need to raise capital with FEAG fee
                 funding_gap = batch_cost - available
+                fee_rate = self.portfolio.get('token_issuance_fee_pct', 0.0)
+                
+                # Calculate gross capital needed: funding_gap / (1 - fee_rate)
+                gross_capital_needed = funding_gap / (1 - fee_rate) if fee_rate < 1.0 else funding_gap
+                feag_issuance_fee = gross_capital_needed * fee_rate
                 
                 # Calculate token price at current NAV
                 current_nav = self.calculate_nav()
                 token_price = (current_nav / self.tokens_outstanding) if self.tokens_outstanding > 0 else 1.0
                 issue_price = token_price * (1 + self.portfolio.get('issuance_premium', 0.0))
                 
-                capital_raised = funding_gap
+                capital_raised = gross_capital_needed
                 new_tokens = capital_raised / issue_price
                 self.tokens_outstanding += new_tokens
+                self.cumulative_feag_issuance_fees += feag_issuance_fee
                 
-                # Add new capital to treasury, then pay for farms
-                self.treasury += capital_raised
+                # Add net capital to treasury (gross - FEAG fee), then pay for farms
+                net_capital = gross_capital_needed - feag_issuance_fee
+                self.treasury += net_capital
                 self.treasury -= batch_cost
                 
                 funding_source = 'mixed' if available > 0 else 'equity'
@@ -467,7 +483,8 @@ class CustomFELTModel:
             'capital_raised': capital_raised,
             'new_tokens': new_tokens,
             'funding_source': funding_source,
-            'farms_count': len(farms_acquired)
+            'farms_count': len(farms_acquired),
+            'feag_issuance_fee': feag_issuance_fee
         }
 
 def run_model(input_data):
@@ -493,6 +510,7 @@ def run_model(input_data):
             year_data['capital_raised'] = acquisition['capital_raised']
             year_data['new_tokens'] = acquisition['new_tokens']
             year_data['funding_source'] = acquisition['funding_source']
+            year_data['feag_issuance_fee'] = acquisition['feag_issuance_fee']
             
             # Process all farms for the year - REAL revenue calculation
             farm_results = []
@@ -897,33 +915,28 @@ def load_data():
     }
     
     for key, local_path in local_files.items():
-        if os.path.exists(local_path):
+        # Try Google Sheets first
+        if key in GOOGLE_SHEETS_URLS:
             try:
-                input_data[key] = pd.read_csv(local_path)
-                st.info(f"✅ Loaded {key} from local file (new format)")
-            except Exception as e:
-                st.warning(f"Could not load {local_path}: {str(e)}")
-                # Fallback to Google Sheets if local fails
-                if key in GOOGLE_SHEETS_URLS:
-                    sheet_data = load_from_google_sheets(GOOGLE_SHEETS_URLS[key], key)
-                    if not sheet_data.empty:
-                        input_data[key] = sheet_data
-                        st.warning(f"⚠️ Loaded {key} from Google Sheets (legacy format)")
-                    else:
-                        input_loaded_successfully = False
-                else:
-                    input_loaded_successfully = False
-        else:
-            # File doesn't exist locally, try Google Sheets
-            if key in GOOGLE_SHEETS_URLS:
                 sheet_data = load_from_google_sheets(GOOGLE_SHEETS_URLS[key], key)
                 if not sheet_data.empty:
                     input_data[key] = sheet_data
-                    st.info(f"📊 Loaded {key} from Google Sheets")
-                else:
-                    input_loaded_successfully = False
-            else:
+                    st.info(f"📊 Loaded {key} from Google Sheets (primary source)")
+                    continue
+            except Exception as e:
+                st.warning(f"Could not load {key} from Google Sheets: {str(e)}")
+        
+        # Fallback to local CSV if Google Sheets fails or doesn't exist
+        if os.path.exists(local_path):
+            try:
+                input_data[key] = pd.read_csv(local_path)
+                st.warning(f"⚠️ Loaded {key} from local file (fallback)")
+            except Exception as e:
+                st.error(f"Could not load {local_path}: {str(e)}")
                 input_loaded_successfully = False
+        else:
+            st.error(f"No data source available for {key}")
+            input_loaded_successfully = False
     
     # Add input data to main data dict
     data.update(input_data)
@@ -2579,16 +2592,32 @@ elif page == "📈 Token Metrics":
                 st.markdown("#### Token Issuance Summary")
                 
                 if 'capital_raised' in issuance.columns:
-                    issuance_summary = issuance[['year', 'funding_source', 'capital_raised', 'new_tokens']].copy()
+                    # Include feag_issuance_fee if available
+                    columns_to_include = ['year', 'funding_source', 'capital_raised', 'new_tokens']
+                    if 'feag_issuance_fee' in issuance.columns:
+                        columns_to_include.append('feag_issuance_fee')
+                    
+                    issuance_summary = issuance[columns_to_include].copy()
                     issuance_summary['price_per_token'] = issuance_summary.apply(
                         lambda row: row['capital_raised'] / row['new_tokens'] if row['new_tokens'] > 0 else 0,
                         axis=1
                     )
+                    
+                    # Format columns
                     issuance_summary['capital_raised'] = issuance_summary['capital_raised'].apply(lambda x: format_currency(x))
                     issuance_summary['new_tokens'] = issuance_summary['new_tokens'].apply(lambda x: format_number(x/1e6, 2) + "M" if x > 0 else "-")
                     issuance_summary['price_per_token'] = issuance_summary['price_per_token'].apply(lambda x: format_currency(x, 2) if x > 0 else "-")
                     
+                    if 'feag_issuance_fee' in issuance_summary.columns:
+                        issuance_summary['feag_issuance_fee'] = issuance_summary['feag_issuance_fee'].apply(lambda x: format_currency(x) if x > 0 else "-")
+                    
                     st.dataframe(issuance_summary, hide_index=True, use_container_width=True)
+                    
+                    # Show total FEAG issuance fees
+                    if 'feag_issuance_fee' in issuance.columns:
+                        total_fees = issuance['feag_issuance_fee'].sum()
+                        if total_fees > 0:
+                            st.metric("Total FEAG Issuance Fees", format_currency(total_fees))
         
         with tab4:
             # Returns Analysis
@@ -3304,7 +3333,7 @@ elif page == "⚙️ Model Inputs":
             categories = {
                 'Investment Parameters': ['land_cost_per_farm', 'dev_cost_per_farm', 'hectares_per_farm'],
                 'Financial Parameters': ['corporate_tax_rate', 'operator_salary_cap', 'working_capital_reserve_pct'],
-                'Token Parameters': ['initial_token_supply', 'initial_raise', 'issuance_premium'],
+                'Token Parameters': ['initial_token_supply', 'initial_raise', 'issuance_premium', 'token_issuance_fee_pct'],
                 'Valuation Parameters': ['land_appreciation_rate', 'green_prints_start_age', 
                                         'green_prints_max_premium', 'green_prints_ramp_years'],
                 'DCF Parameters': ['discount_rate', 'growth_rate_yr1_2', 'growth_rate_yr3_5', 
@@ -3661,6 +3690,8 @@ elif page == "📋 Detailed Reports":
             - **Financial Performance**: ${year_10.get('gross_revenue', 0)/1e6:.0f}M annual revenue with {(year_10.get('net_to_treasury', 0)/year_10.get('gross_revenue', 1)*100):.1f}% net margin
             - **NAV Growth**: ${year_1.get('total_nav', 0)/1e6:.0f}M → ${year_10.get('total_nav', 0)/1e6:.0f}M ({year_10.get('total_nav', 1)/year_1.get('total_nav', 1):.1f}x growth)
             - **Treasury Management**: ${year_10.get('treasury_nav', year_10.get('closing_treasury', 0))/1e6:.0f}M treasury supporting self-funded growth
+            - **Total FEAG PDF**: ${data['portfolio']['pdf_total'].sum()/1e6 if 'pdf_total' in data['portfolio'].columns else 0:.0f}M
+            - **Total FEAG Issuance Fees**: ${data['portfolio']['feag_issuance_fee'].sum()/1e6 if 'feag_issuance_fee' in data['portfolio'].columns else 0:.0f}M
             
             **Investment Highlights:**
             ✅ Diversified revenue streams across carbon, biodiversity, and beef markets
