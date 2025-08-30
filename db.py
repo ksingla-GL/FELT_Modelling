@@ -1013,6 +1013,104 @@ def load_data():
     
     return data
 
+# Quiet redefinition of load_data to suppress noisy load-source messages
+def load_data():
+    """Load all CSV files or run model; quiet UI for data-source messages"""
+    data = {}
+
+    # Load inputs (prefer Google Sheets, then local), but do not spam UI on success
+    input_data = {}
+    input_loaded_successfully = True
+
+    local_files = {
+        'portfolio_config': 'inputs/1_portfolio_config.csv',
+        'acquisition_mix': 'inputs/2_acquisition_mix.csv',
+        'cop_revenue': 'inputs/3_cop_revenue_timelines.csv',
+        'cost_structure': 'inputs/4_cost_structure.csv',
+        'market_prices': 'inputs/5_market_prices.csv'
+    }
+
+    for key, local_path in local_files.items():
+        # Try Google Sheets first (quiet on success/failure; rely on local fallback)
+        if key in GOOGLE_SHEETS_URLS:
+            try:
+                sheet_data = load_from_google_sheets(GOOGLE_SHEETS_URLS[key], key)
+                if not sheet_data.empty:
+                    input_data[key] = sheet_data
+                    continue
+            except Exception:
+                pass
+
+        # Fallback to local CSV
+        if os.path.exists(local_path):
+            try:
+                input_data[key] = pd.read_csv(local_path)
+            except Exception as e:
+                st.error(f"Could not load {local_path}: {str(e)}")
+                input_loaded_successfully = False
+        else:
+            input_loaded_successfully = False
+
+    data.update(input_data)
+
+    # Try to run the model with current inputs
+    model_outputs = {}
+    if input_loaded_successfully and len(input_data) == 5:
+        with st.spinner("Running financial model with current inputs..."):
+            try:
+                model_outputs = run_model(input_data)
+                if model_outputs:
+                    for key, value in model_outputs.items():
+                        if key not in ['acquisition_mix']:
+                            data[key] = value
+                else:
+                    st.warning("Model execution failed, using static files")
+            except Exception as e:
+                st.error(f"Model execution error: {str(e)}")
+                with st.expander("Debug Information"):
+                    import traceback
+                    st.code(traceback.format_exc())
+                st.warning("Model execution failed, using static files")
+    else:
+        # Fall back to static outputs if inputs incomplete
+        st.warning("Not all inputs available, using static output files")
+
+    # Fallback: static outputs
+    if not model_outputs:
+        files = {
+            'portfolio': 'output_portfolio_summary.csv',
+            'stakeholder': 'output_stakeholder_flows.csv',
+            'farm_ledger': 'output_farm_ledger.csv',
+            'nav_recon': 'output_nav_reconciliation.csv',
+            'token_metrics': 'output_token_metrics.csv',
+            'acquisition': 'output_acquisition_schedule.csv',
+            'scenarios': 'scenario_comparison.csv',
+            'sensitivity': 'sensitivity_analysis.csv',
+            'monte_carlo': 'monte_carlo_results.csv',
+            'monte_stats': 'monte_carlo_stats.csv',
+            'scenario_details': 'scenario_details.csv'
+        }
+
+        for key, filename in files.items():
+            if key not in data:
+                filepath = f'outputs/{filename}'
+                if os.path.exists(filepath):
+                    try:
+                        data[key] = pd.read_csv(filepath)
+                    except Exception as e:
+                        st.warning(f"Could not load {filename}: {str(e)}")
+
+        # Executive KPIs text
+        kpi_file = 'outputs/output_executive_kpi.txt'
+        if os.path.exists(kpi_file):
+            try:
+                with open(kpi_file, 'r') as f:
+                    data['executive_kpis'] = f.read()
+            except Exception as e:
+                st.warning(f"Could not load executive KPIs: {str(e)}")
+
+    return data
+
 # Load data
 data = load_data()
 
@@ -1805,8 +1903,12 @@ elif page == "💰 Financial Analysis":
         st.markdown("### Profit & Loss Statement")
         
         if 'portfolio' in data and 'stakeholder' in data:
-            # Combine portfolio and stakeholder data
-            pnl_data = pd.merge(data['portfolio'], data['stakeholder'], on='year')
+            # Combine portfolio and stakeholder data without duplicating cost columns
+            stake_cols = ['year', 'pdf_total', 'expert_total', 'supplier_total',
+                          'admin_total', 'operator_paid_total', 'operator_overflow_total', 'tax_total']
+            portfolio_core = data['portfolio'].drop(columns=[c for c in stake_cols if c in data['portfolio'].columns and c != 'year'], errors='ignore')
+            stakeholder_only = data['stakeholder'][[c for c in stake_cols if c in data['stakeholder'].columns]]
+            pnl_data = pd.merge(portfolio_core, stakeholder_only, on='year', how='left')
             
             # Show if we have data
             stakeholder_sum = data['stakeholder']['expert_total'].sum() if 'expert_total' in data['stakeholder'].columns else 0
@@ -1814,7 +1916,14 @@ elif page == "💰 Financial Analysis":
                 st.warning("⚠️ No cost data found. Try selecting a different year or ensure the financial model has been run.")
             
             # Create P&L table for selected year
-            year_data = pnl_data[pnl_data['year'] == st.session_state.selected_year].iloc[0]
+            try:
+                port_row = data['portfolio'][data['portfolio']['year'] == st.session_state.selected_year].iloc[0]
+            except Exception:
+                port_row = {}
+            try:
+                stake_row = data['stakeholder'][data['stakeholder']['year'] == st.session_state.selected_year].iloc[0]
+            except Exception:
+                stake_row = {}
             
             # Check if user is viewing Year 1 (which should be zero)
             if st.session_state.selected_year == 1:
@@ -1825,14 +1934,14 @@ elif page == "💰 Financial Analysis":
             with col1:
                 st.markdown("#### Revenue")
                 revenue_items = {
-                    'Gross Revenue': year_data.get('gross_revenue', 0),
+                    'Gross Revenue': (port_row.get('gross_revenue', 0) if isinstance(port_row, dict) else port_row.get('gross_revenue', 0)),
                     '': '',
                     'Less: Distributions': '',
-                    '  Expert Fees': -year_data.get('expert_total', 0),
-                    '  Supplier Costs': -year_data.get('supplier_total', 0),
-                    '  Operator Payments': -year_data.get('operator_paid_total', 0),
-                    '  Admin Costs': -year_data.get('admin_total', 0),
-                    '  PDF Fees': -year_data.get('pdf_total', 0)
+                    '  Expert Fees': -(stake_row.get('expert_total', 0) if isinstance(stake_row, dict) else stake_row.get('expert_total', 0)),
+                    '  Supplier Costs': -(stake_row.get('supplier_total', 0) if isinstance(stake_row, dict) else stake_row.get('supplier_total', 0)),
+                    '  Operator Payments': -(stake_row.get('operator_paid_total', 0) if isinstance(stake_row, dict) else stake_row.get('operator_paid_total', 0)),
+                    '  Admin Costs': -(stake_row.get('admin_total', 0) if isinstance(stake_row, dict) else stake_row.get('admin_total', 0)),
+                    '  PDF Fees': -(stake_row.get('pdf_total', 0) if isinstance(stake_row, dict) else stake_row.get('pdf_total', 0))
                 }
                 
                 revenue_df = pd.DataFrame(list(revenue_items.items()), columns=['Item', 'Amount'])
@@ -1843,9 +1952,9 @@ elif page == "💰 Financial Analysis":
                 st.markdown("#### Net Income")
                 
                 # Use available columns with safe fallbacks
-                tax = year_data.get('tax_total', 0)
-                net = year_data.get('net_to_treasury', 0) 
-                gross = year_data.get('gross_revenue', 1)
+                tax = (stake_row.get('tax_total', 0) if isinstance(stake_row, dict) else stake_row.get('tax_total', 0))
+                net = (port_row.get('net_to_treasury', 0) if isinstance(port_row, dict) else port_row.get('net_to_treasury', 0))
+                gross = (port_row.get('gross_revenue', 1) if isinstance(port_row, dict) else port_row.get('gross_revenue', 1))
                 
                 # Calculate pretax from net + tax (simple calculation)
                 pretax = net + tax
