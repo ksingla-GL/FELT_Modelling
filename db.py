@@ -70,9 +70,10 @@ class CoP:
         streams = {}
         
         for stream in STREAMS:
-            units_per_ha = revenue_lookup.get((self.type, stream, age), 0)
+            # Normalize keys to match how dictionaries were constructed (.strip().lower())
+            units_per_ha = revenue_lookup.get((self.type.strip().lower(), stream.strip().lower(), age), 0)
             units = units_per_ha * self.hectares
-            price = prices.get((stream, year), 0)
+            price = prices.get((stream.strip().lower(), year), 0)
             rev = units * price
             streams[stream] = rev
             gross += rev
@@ -213,7 +214,11 @@ class CustomFELTModel:
             revenue_df = self.input_data['cop_revenue']
             self.revenue_lookup = {}
             for _, row in revenue_df.iterrows():
-                key = (row['cop_type'], row['stream'], int(row['operational_age']))
+                # Normalize keys to avoid case/whitespace mismatches across inputs
+                cop_key = str(row['cop_type']).strip().lower()
+                stream_key = str(row['stream']).strip().lower()
+                age_key = int(row['operational_age'])
+                key = (cop_key, stream_key, age_key)
                 self.revenue_lookup[key] = float(row['units_per_hectare'])
         else:
             st.error("Revenue timeline data missing")
@@ -265,8 +270,10 @@ class CustomFELTModel:
             self.base_prices = {}
             self.price_growth = {}
             for _, row in prices_df.iterrows():
-                self.base_prices[row['asset']] = float(row['spot_price'])
-                self.price_growth[row['asset']] = float(row['annual_growth_rate'])
+                # Normalize asset keys to ensure matching with STREAMS ('forestry','soil','biodiversity','beef')
+                asset_key = str(row['asset']).strip().lower()
+                self.base_prices[asset_key] = float(row['spot_price'])
+                self.price_growth[asset_key] = float(row['annual_growth_rate'])
                 
             # Calculate prices for all years
             self.prices = {}
@@ -780,6 +787,25 @@ if 'selected_year' not in st.session_state:
     st.session_state.selected_year = 10
 if 'selected_farm' not in st.session_state:
     st.session_state.selected_farm = None
+
+def validate_year_data(data, year, dataset_name="portfolio"):
+    """
+    Validate if data exists for a given year in a specific dataset.
+    Returns (has_data: bool, message: str)
+    """
+    if dataset_name not in data:
+        return False, f"❌ {dataset_name.title()} data not found"
+    
+    if 'year' not in data[dataset_name].columns:
+        return False, f"❌ Year column not found in {dataset_name} data"
+    
+    available_years = data[dataset_name]['year'].unique()
+    if year not in available_years:
+        available_list = ', '.join(map(str, sorted(available_years)))
+        return False, f"⚠️ No data for Year {year} in {dataset_name}. Available: {available_list}"
+    
+    return True, f"✅ Data available for Year {year}"
+
 if 'selected_scenario' not in st.session_state:
     st.session_state.selected_scenario = 'Base'
 
@@ -1183,15 +1209,31 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Global Filters")
     
-    # Year selector
+    # Year selector with data validation
+    available_years = []
+    if 'portfolio' in data and 'year' in data['portfolio'].columns:
+        available_years = sorted(data['portfolio']['year'].unique())
+        max_year = max(available_years) if available_years else 10
+    else:
+        max_year = 10
+    
     year_select = st.slider(
         "Select Year",
         min_value=1,
-        max_value=10,
-        value=st.session_state.selected_year,
+        max_value=max_year,
+        value=min(st.session_state.selected_year, max_year),
         help="Select year for detailed analysis"
     )
     st.session_state.selected_year = year_select
+    
+    # Data availability indicator
+    if available_years:
+        if year_select in available_years:
+            st.success(f"✅ Data available for Year {year_select}")
+        else:
+            st.warning(f"⚠️ Limited or no data available for Year {year_select}. Available years: {', '.join(map(str, available_years))}")
+    else:
+        st.error("❌ No portfolio data found. Please ensure the model has been run and data is available.")
     
     # Add cache control
     st.markdown("---")
@@ -1600,18 +1642,40 @@ elif page == "🏞️ Farm Portfolio":
     if 'farm_ledger' in data:
         current_year_farms = data['farm_ledger'][data['farm_ledger']['year'] == st.session_state.selected_year]
         
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Active Farms", len(current_year_farms['farm_id'].unique()))
-        with col2:
-            avg_revenue = current_year_farms.get('gross', current_year_farms.get('gross_revenue', pd.Series([0]))).mean()
-            st.metric("Avg Revenue/Farm", format_currency(avg_revenue/1e6, 2) + "M")
-        with col3:
-            avg_profit = current_year_farms.get('net_to_treasury', pd.Series([0])).mean()
-            st.metric("Avg Net/Farm", format_currency(avg_profit/1e6, 2) + "M")
-        with col4:
-            total_hectares = len(current_year_farms['farm_id'].unique()) * 1000  # Assuming 1000 hectares per farm
-            st.metric("Total Hectares", format_number(total_hectares))
+        
+        # Check if data exists for the selected year
+        if len(current_year_farms) == 0:
+            st.warning(f"⚠️ No farm data found for Year {st.session_state.selected_year}. This may be expected for Year 1 (farms not yet producing) or if data hasn't been generated for this year.")
+            # Show zero metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Active Farms", 0)
+            with col2:
+                st.metric("Avg Revenue/Farm", "$0.00M")
+            with col3:
+                st.metric("Avg Net/Farm", "$0.00M")
+            with col4:
+                st.metric("Total Hectares", "0")
+        else:
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Active Farms", len(current_year_farms['farm_id'].unique()))
+            with col2:
+                # Prefer 'gross' column; fall back to 'gross_revenue' if present
+                if 'gross' in current_year_farms.columns:
+                    avg_revenue = current_year_farms['gross'].mean()
+                elif 'gross_revenue' in current_year_farms.columns:
+                    avg_revenue = current_year_farms['gross_revenue'].mean()
+                else:
+                    avg_revenue = 0.0
+                st.metric("Avg Revenue/Farm", format_currency(avg_revenue/1e6, 2) + "M")
+            with col3:
+                avg_profit = current_year_farms.get('net_to_treasury', pd.Series([0])).mean()
+                st.metric("Avg Net/Farm", format_currency(avg_profit/1e6, 2) + "M")
+            with col4:
+                total_hectares = len(current_year_farms['farm_id'].unique()) * 1000  # Assuming 1000 hectares per farm
+                st.metric("Total Hectares", format_number(total_hectares))
+            
         
         # Farm performance tabs
         tab1, tab2, tab3, tab4 = st.tabs(["🌟 Individual Farms", "📊 Performance Distribution", "📈 Maturity Analysis", "🗺️ Geographic View"])
@@ -1652,7 +1716,16 @@ elif page == "🏞️ Farm Portfolio":
                 # Farm quick stats
                 if selected_farm:
                     farm_data = data['farm_ledger'][data['farm_ledger']['farm_id'] == selected_farm]
-                    latest = farm_data[farm_data['year'] == farm_data['year'].max()].iloc[0]
+                    # Get farm stats for the selected year instead of max year
+                    selected_year_data = farm_data[farm_data['year'] == st.session_state.selected_year]
+                    if len(selected_year_data) > 0:
+                        latest = selected_year_data.iloc[0]
+                    else:
+                        # If no data for selected year, use available data or show message
+                        if len(farm_data) > 0:
+                            latest = farm_data.iloc[0]  # Use first available year
+                        else:
+                            latest = pd.Series(dtype=float)
                     
                     st.markdown("### Farm Stats")
                     if 'farm_type' in latest:
@@ -1685,17 +1758,42 @@ elif page == "🏞️ Farm Portfolio":
                     existing_rev_cols = [col for col in revenue_cols if col in farm_data.columns]
                     
                     if existing_rev_cols:
-                        latest_revenue = farm_data[farm_data['year'] == farm_data['year'].max()][existing_rev_cols].iloc[0]
+                        # Helper: pick the row closest to the selected year (by absolute difference)
+                        def _nearest_year_row(df, year):
+                            if len(df) == 0 or 'year' not in df.columns:
+                                return df
+                            if year in df['year'].values:
+                                return df[df['year'] == year].iloc[[0]]
+                            # Choose the closest year (prior or next) deterministically
+                            nearest_idx = (df['year'] - year).abs().idxmin()
+                            return df.loc[[nearest_idx]]
+
+                        selected_year = st.session_state.selected_year
+                        selected_year_data = _nearest_year_row(farm_data, selected_year)
+                        # Ensure numeric values (coerce any strings/NaNs to 0.0)
+                        latest_revenue = (
+                            selected_year_data[existing_rev_cols]
+                            .iloc[0]
+                            .apply(pd.to_numeric, errors='coerce')
+                            .fillna(0.0)
+                        )
                         
+
+                        # Show values as labels in $M for clarity
                         fig.add_trace(
                             go.Bar(
                                 x=[col.replace('gross_', '').title() for col in existing_rev_cols],
                                 y=latest_revenue.values/1e6,
                                 marker_color='#4CAF50',
+                                text=[f"{v/1e6:.2f}M" for v in latest_revenue.values],
+                                textposition="auto",
                                 showlegend=False
                             ),
                             row=1, col=1
                         )
+                        # Indicate which year’s data was used (exact or nearest)
+                        used_year = int(selected_year_data['year'].iloc[0]) if 'year' in selected_year_data.columns else selected_year
+                        st.caption(f"Revenue shown for Year {used_year} of this farm.")
                     
                     # Profit evolution
                     if 'net_to_treasury' in farm_data.columns and 'age' in farm_data.columns:
@@ -1711,7 +1809,18 @@ elif page == "🏞️ Farm Portfolio":
                         )
                     
                     # Cost breakdown
-                    latest = farm_data[farm_data['year'] == farm_data['year'].max()].iloc[0]
+                    # Get cost data for the selected year instead of max year
+                    selected_year = st.session_state.selected_year
+                    # Reuse the same nearest-year selection for the cost panel
+                    def _nearest_year_row(df, year):
+                        if len(df) == 0 or 'year' not in df.columns:
+                            return df
+                        if year in df['year'].values:
+                            return df[df['year'] == year].iloc[[0]]
+                        nearest_idx = (df['year'] - year).abs().idxmin()
+                        return df.loc[[nearest_idx]]
+                    selected_year_data = _nearest_year_row(farm_data, selected_year)
+                    latest = selected_year_data.iloc[0] if len(selected_year_data) > 0 else pd.Series(dtype=float)
                     cost_cols = ['pdf_fee', 'supplier_costs', 'expert_fee', 'admin', 'operator_paid', 'tax']
                     costs = {}
                     for col, label in zip(cost_cols, ['PDF', 'Supplier', 'Expert', 'Admin', 'Operator', 'Tax']):
@@ -1763,7 +1872,20 @@ elif page == "🏞️ Farm Portfolio":
             latest_data = []
             for farm_id in data['farm_ledger']['farm_id'].unique():
                 farm = data['farm_ledger'][data['farm_ledger']['farm_id'] == farm_id]
-                latest = farm[farm['year'] == farm['year'].max()].iloc[0]
+                # Get performance data for the selected year instead of max year
+                selected_year_data = farm[farm['year'] == st.session_state.selected_year]
+                if len(selected_year_data) > 0:
+                    latest = selected_year_data.iloc[0]
+                else:
+                    # If no data for selected year, create empty data
+                    latest = pd.Series({
+                        'farm_type': 'unknown',
+                        'age': 0,
+                        'gross': 0,
+                        'net_to_treasury': 0,
+                        'cum_profit': 0,
+                        'land_fmv': 0
+                    })
                 latest_data.append({
                     'farm_id': farm_id,
                     'type': latest.get('farm_type', 'unknown'),
@@ -1878,7 +2000,16 @@ elif page == "💰 Financial Analysis":
     
     # Financial overview
     if 'portfolio' in data:
-        current = data['portfolio'][data['portfolio']['year'] == st.session_state.selected_year].iloc[0]
+        try:
+            filtered_portfolio = data['portfolio'][data['portfolio']['year'] == st.session_state.selected_year]
+            if len(filtered_portfolio) == 0:
+                st.warning(f"⚠️ No portfolio data found for Year {st.session_state.selected_year}. Displaying default values.")
+                current = {}
+            else:
+                current = filtered_portfolio.iloc[0]
+        except Exception as e:
+            st.error(f"Error loading portfolio data for Year {st.session_state.selected_year}: {str(e)}")
+            current = {}
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -1925,9 +2056,6 @@ elif page == "💰 Financial Analysis":
             except Exception:
                 stake_row = {}
             
-            # Check if user is viewing Year 1 (which should be zero)
-            if st.session_state.selected_year == 1:
-                st.warning("⚠️ Year 1 shows $0 costs because farms haven't started producing yet. Select Year 2+ to see actual P&L data.")
             
             col1, col2 = st.columns(2)
             
@@ -2032,7 +2160,16 @@ elif page == "💰 Financial Analysis":
         st.markdown("### NAV Reconciliation Bridge")
         
         if 'nav_recon' in data:
-            year_nav = data['nav_recon'][data['nav_recon']['year'] == st.session_state.selected_year].iloc[0]
+            try:
+                filtered_nav = data['nav_recon'][data['nav_recon']['year'] == st.session_state.selected_year]
+                if len(filtered_nav) == 0:
+                    st.warning(f"⚠️ No NAV data found for Year {st.session_state.selected_year}.")
+                    year_nav = {}
+                else:
+                    year_nav = filtered_nav.iloc[0]
+            except Exception as e:
+                st.error(f"Error loading NAV data for Year {st.session_state.selected_year}: {str(e)}")
+                year_nav = {}
             
             # Create waterfall chart
             fig = go.Figure(go.Waterfall(
@@ -2085,7 +2222,16 @@ elif page == "💰 Financial Analysis":
         st.markdown("### Stakeholder Distribution Analysis")
         
         if 'stakeholder' in data:
-            stakeholder_data = data['stakeholder'][data['stakeholder']['year'] == st.session_state.selected_year].iloc[0]
+            try:
+                filtered_stakeholder = data['stakeholder'][data['stakeholder']['year'] == st.session_state.selected_year]
+                if len(filtered_stakeholder) == 0:
+                    st.warning(f"⚠️ No stakeholder data found for Year {st.session_state.selected_year}.")
+                    stakeholder_data = {}
+                else:
+                    stakeholder_data = filtered_stakeholder.iloc[0]
+            except Exception as e:
+                st.error(f"Error loading stakeholder data for Year {st.session_state.selected_year}: {str(e)}")
+                stakeholder_data = {}
             
             col1, col2 = st.columns(2)
             
@@ -2327,7 +2473,16 @@ elif page == "💰 Financial Analysis":
             acquisition = data['acquisition']
             
             # Treasury metrics
-            current = portfolio[portfolio['year'] == st.session_state.selected_year].iloc[0]
+            try:
+                filtered_treasury = portfolio[portfolio['year'] == st.session_state.selected_year]
+                if len(filtered_treasury) == 0:
+                    st.warning(f"⚠️ No treasury data found for Year {st.session_state.selected_year}.")
+                    current = {}
+                else:
+                    current = filtered_treasury.iloc[0]
+            except Exception as e:
+                st.error(f"Error loading treasury data for Year {st.session_state.selected_year}: {str(e)}")
+                current = {}
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -2480,7 +2635,16 @@ elif page == "📈 Token Metrics":
     st.markdown("# 📈 Token Metrics & Valuation")
     
     if 'portfolio' in data:
-        current = data['portfolio'][data['portfolio']['year'] == st.session_state.selected_year].iloc[0]
+        try:
+            filtered_token_data = data['portfolio'][data['portfolio']['year'] == st.session_state.selected_year]
+            if len(filtered_token_data) == 0:
+                st.warning(f"⚠️ No token data found for Year {st.session_state.selected_year}.")
+                current = {}
+            else:
+                current = filtered_token_data.iloc[0]
+        except Exception as e:
+            st.error(f"Error loading token data for Year {st.session_state.selected_year}: {str(e)}")
+            current = {}
         
         # Token metrics overview
         col1, col2, col3, col4 = st.columns(4)
