@@ -59,7 +59,7 @@ class CoP:
         self.cum_profit = 0.0
         self.ledger = []
         
-    def compute_year(self, year, prices, stream_costs, caps, tax_rate, revenue_lookup, green_prints_params):
+    def compute_year(self, year, prices, stream_costs, fixed_costs, caps, tax_rate, revenue_lookup, green_prints_params):
         """Compute farm P&L for given year - REAL implementation"""
         age = year - self.a_year + 1
         if age < 1 or age > 10:
@@ -87,14 +87,25 @@ class CoP:
             stream_rev = streams.get(stream, 0)
             if stream_rev > 0:
                 stream_cost_rates = stream_costs[stream]
-                stream_pays = {k: stream_cost_rates[k] * stream_rev for k in stream_cost_rates.keys()}
+                stream_fixed_costs = fixed_costs[stream]
+                stream_pays = {}
+                
+                for k in stream_cost_rates.keys():
+                    if k in ['supplier', 'expert', 'operator'] and stream_fixed_costs.get(k) is not None:
+                        # Use fixed cost for supplier, expert, operator
+                        stream_pays[k] = stream_fixed_costs[k]
+                    else:
+                        # Use percentage for other costs (project_development, admin, treasury_pretax)
+                        stream_pays[k] = stream_cost_rates[k] * stream_rev
                 
                 # Accumulate totals for each stakeholder
                 for stakeholder in ['project_development', 'expert', 'supplier', 'admin', 'operator']:
                     total_pays[stakeholder] += stream_pays.get(stakeholder, 0)
                 
-                # Stream treasury (before operator cap adjustment)
-                stream_treasury = stream_pays.get('treasury_pretax', 0)
+                # Stream treasury (before operator cap adjustment) - calculate dynamically
+                # Treasury = Revenue - All actual costs for this stream
+                stream_total_costs = sum(stream_pays.get(k, 0) for k in ['project_development', 'expert', 'supplier', 'admin', 'operator'])
+                stream_treasury = stream_rev - stream_total_costs
                 total_treasury_pretax += stream_treasury
                 stream_profits[stream] = stream_treasury
         
@@ -232,12 +243,21 @@ class CustomFELTModel:
             if 'stream' in cost_df.columns:
                 # New stream-based format
                 self.stream_costs = {}
+                self.fixed_costs = {}
                 for _, row in cost_df.iterrows():
                     stream = row['stream']
                     stakeholder = row['stakeholder']
                     if stream not in self.stream_costs:
                         self.stream_costs[stream] = {}
-                    self.stream_costs[stream][stakeholder] = float(row['percentage'])
+                        self.fixed_costs[stream] = {}
+                    
+                    # Use fixed costs for supplier, expert, operator if available
+                    if stakeholder in ['supplier', 'expert', 'operator'] and pd.notna(row.get('fixed_cost', None)):
+                        self.stream_costs[stream][stakeholder] = 0.0  # Set to 0 for treasury calculation
+                        self.fixed_costs[stream][stakeholder] = float(row['fixed_cost'])
+                    else:
+                        self.stream_costs[stream][stakeholder] = float(row['percentage']) if pd.notna(row['percentage']) else 0.0
+                        self.fixed_costs[stream][stakeholder] = None
                 
                 # Calculate treasury rates as balancing figures for each stream
                 for stream in self.stream_costs:
@@ -253,15 +273,21 @@ class CustomFELTModel:
                 # Apply old costs to all streams equally
                 streams = ['forestry', 'soil', 'biodiversity', 'beef']
                 self.stream_costs = {}
+                self.fixed_costs = {}
                 for stream in streams:
                     self.stream_costs[stream] = old_costs.copy()
+                    self.fixed_costs[stream] = {k: None for k in old_costs.keys()}  # No fixed costs in legacy format
                     # Ensure treasury is calculated as balancing figure
                     if 'treasury_pretax' in self.stream_costs[stream]:
                         del self.stream_costs[stream]['treasury_pretax']
                     total_other_costs = sum(self.stream_costs[stream].values())
                     self.stream_costs[stream]['treasury_pretax'] = 1.0 - total_other_costs
+                    self.fixed_costs[stream]['treasury_pretax'] = None
         else:
             st.error("Cost structure data missing")
+            # Initialize empty structures to prevent errors
+            self.stream_costs = {}
+            self.fixed_costs = {}
             return
         
         # Market prices
@@ -527,6 +553,7 @@ def run_model(input_data):
                     year, 
                     model.prices, 
                     model.stream_costs, 
+                    model.fixed_costs,
                     model.caps,
                     model.portfolio['corporate_tax_rate'],
                     model.revenue_lookup,

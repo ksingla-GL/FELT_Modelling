@@ -23,7 +23,7 @@ class CoP:
         self.cum_profit = 0.0
         self.ledger = []
         
-    def compute_year(self, year, prices, stream_costs, caps, tax_rate, revenue_lookup, green_prints_params):
+    def compute_year(self, year, prices, stream_costs, fixed_costs, caps, tax_rate, revenue_lookup, green_prints_params):
         """Compute farm P&L for given year"""
         age = year - self.a_year + 1
         if age < 1 or age > 10:
@@ -37,23 +37,35 @@ class CoP:
         total_treasury_pretax = 0.0
         
         for stream in STREAMS:
-            units_per_ha = revenue_lookup.get((self.type, stream, age), 0)
+            # Normalize keys to match how dictionaries were constructed (.strip().lower())
+            units_per_ha = revenue_lookup.get((self.type.strip().lower(), stream.strip().lower(), age), 0)
             units = units_per_ha * self.hectares
-            price = prices.get((stream, year), 0)
+            price = prices.get((stream.strip().lower(), year), 0)
             stream_rev = units * price
             streams[stream] = stream_rev
             gross += stream_rev
             
             # Stream-level cost allocations
             stream_cost_rates = stream_costs[stream]
-            stream_pays = {k: stream_cost_rates[k] * stream_rev for k in stream_cost_rates.keys()}
+            stream_fixed_costs = fixed_costs[stream]
+            stream_pays = {}
+            
+            for k in stream_cost_rates.keys():
+                if k in ['supplier', 'expert', 'operator'] and stream_fixed_costs.get(k) is not None:
+                    # Use fixed cost for supplier, expert, operator
+                    stream_pays[k] = stream_fixed_costs[k]
+                else:
+                    # Use percentage for other costs (project_development, admin, treasury_pretax)
+                    stream_pays[k] = stream_cost_rates[k] * stream_rev
             
             # Accumulate totals for each stakeholder
             for stakeholder in ['project_development', 'expert', 'supplier', 'admin', 'operator']:
                 total_pays[stakeholder] += stream_pays.get(stakeholder, 0)
             
-            # Stream treasury (before operator cap adjustment)
-            stream_treasury = stream_pays.get('treasury_pretax', 0)
+            # Stream treasury (before operator cap adjustment) - calculate dynamically
+            # Treasury = Revenue - All actual costs for this stream
+            stream_total_costs = sum(stream_pays.get(k, 0) for k in ['project_development', 'expert', 'supplier', 'admin', 'operator'])
+            stream_treasury = stream_rev - stream_total_costs
             total_treasury_pretax += stream_treasury
             
             # Store stream profit (before operator cap and tax)
@@ -159,12 +171,21 @@ class FELTModel:
         # Cost structure - stream-based
         cost_df = pd.read_csv('inputs/4_cost_structure.csv')
         self.stream_costs = {}
+        self.fixed_costs = {}
         for _, row in cost_df.iterrows():
             stream = row['stream']
             stakeholder = row['stakeholder']
             if stream not in self.stream_costs:
                 self.stream_costs[stream] = {}
-            self.stream_costs[stream][stakeholder] = float(row['percentage'])
+                self.fixed_costs[stream] = {}
+            
+            # Use fixed costs for supplier, expert, operator if available
+            if stakeholder in ['supplier', 'expert', 'operator'] and pd.notna(row.get('fixed_cost', None)):
+                self.stream_costs[stream][stakeholder] = 0.0  # Set to 0 for treasury calculation
+                self.fixed_costs[stream][stakeholder] = float(row['fixed_cost'])
+            else:
+                self.stream_costs[stream][stakeholder] = float(row['percentage']) if pd.notna(row['percentage']) else 0.0
+                self.fixed_costs[stream][stakeholder] = None
         
         # Calculate treasury rates as balancing figures for each stream
         for stream in self.stream_costs:
@@ -427,6 +448,7 @@ class FELTModel:
                     year, 
                     self.prices, 
                     self.stream_costs, 
+                    self.fixed_costs,
                     self.caps,
                     self.portfolio['corporate_tax_rate'],
                     self.revenue_lookup,
@@ -545,7 +567,12 @@ class FELTModel:
                         if stream_rev > 0:
                             stream_revenues[stream] = stream_rev
                             stream_costs = self.stream_costs[stream]
-                            total_uncapped_operator += stream_costs['operator'] * stream_rev
+                            stream_fixed_costs = self.fixed_costs[stream]
+                            # Use fixed cost if available, otherwise use percentage
+                            if stream_fixed_costs.get('operator') is not None:
+                                total_uncapped_operator += stream_fixed_costs['operator']
+                            else:
+                                total_uncapped_operator += stream_costs['operator'] * stream_rev
                     
                     # Apply operator cap at farm level
                     capped_operator = min(total_uncapped_operator, self.caps['operator_salary_cap'])
@@ -561,9 +588,23 @@ class FELTModel:
                             stream_share = stream_rev / farm_gross_rev
                             allocated_operator = capped_operator * stream_share
                             
-                            # Calculate other costs normally
-                            expert_cost = stream_costs['expert'] * stream_rev
-                            supplier_cost = stream_costs['supplier'] * stream_rev
+                            # Calculate other costs - use fixed costs where available
+                            stream_fixed_costs = self.fixed_costs[stream]
+                            
+                            # Expert cost - fixed if available, otherwise percentage
+                            if stream_fixed_costs.get('expert') is not None:
+                                expert_cost = stream_fixed_costs['expert']
+                            else:
+                                expert_cost = stream_costs['expert'] * stream_rev
+                                
+                            # Supplier cost - fixed if available, otherwise percentage
+                            if stream_fixed_costs.get('supplier') is not None:
+                                supplier_cost = stream_fixed_costs['supplier']
+                            else:
+                                supplier_cost = stream_costs['supplier'] * stream_rev
+                                
+                            # Operator cost - already calculated above as allocated_operator
+                            # Project development and admin always use percentage
                             project_dev_cost = stream_costs['project_development'] * stream_rev
                             admin_cost = stream_costs['admin'] * stream_rev
                             

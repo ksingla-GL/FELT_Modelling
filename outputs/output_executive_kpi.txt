@@ -1,18 +1,18 @@
 FELT Token Model - Executive KPIs
 =====================================
-Year 10 Token Price (DCF): $9.28
-Year 10 Token Price (NAV): $4.03
-DCF Premium: 130.3%
-Token Multiple (DCF): 9.28x
-Token Multiple (NAV): 4.03x
+Year 10 Token Price (DCF): $7.13
+Year 10 Token Price (NAV): $3.54
+DCF Premium: 101.2%
+Token Multiple (DCF): 7.13x
+Token Multiple (NAV): 3.54x
 Self-Funding Year: 7
 Total Farms: 100
-Portfolio NAV: $2,688,214,176
+Portfolio NAV: $2,471,229,503
 Land NAV: $1,929,361,426
-Treasury NAV: $758,852,750
+Treasury NAV: $541,868,077
 Total FEAG PDF: $770,913,367
-Total FEAG Issuance Fees: $36,059,418
-Min Mature Farm Profit: $22,298,406
+Total FEAG Issuance Fees: $38,192,273
+Min Mature Farm Profit: $18,854,242
 
 Key Checks:
 - Year 1 Treasury after purchases: $-7,000,000
